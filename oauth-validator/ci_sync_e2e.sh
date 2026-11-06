@@ -35,13 +35,18 @@ NEXT=1
 # Sets $TOK (no subshell, so the counter advances).
 next_token() { TOK="$TD/token_p${NEXT}.txt"; NEXT=$((NEXT + 1)); }
 try_login() { docker exec "$NAME" /tmp/oauth_client 127.0.0.1 5432 postgres "$ROLE" "$1" >/dev/null 2>&1; }
-expect() {
-  local name=$1 want=$2
+expect() { # name want [server-log reason that must explain a denial]
+  local name=$1 want=$2 reason=${3:-}
   next_token
   if try_login "$TOK"; then got=ok; else got=fail; fi
   echo "  ($name used $(basename "$TOK"))"
   [[ $got == "$want" ]] || { echo "FAIL $name expected $want got $got"; docker logs --tail 30 "$NAME" || true; exit 1; }
-  echo "PASS $name ($got)"
+  if [[ $want == fail && -n $reason ]]; then
+    sleep 0.2
+    docker logs --tail 6 "$NAME" 2>&1 | grep -q -- "$reason" \
+      || { echo "FAIL $name denied for the wrong reason (want '$reason')"; docker logs --tail 6 "$NAME" 2>&1; exit 1; }
+  fi
+  echo "PASS $name ($got${reason:+, reason: $reason})"
 }
 put_state() { # $1 = local file; install as root-owned 0644 at $STATE
   docker cp "$1" "$NAME:$STATE.tmp"
@@ -93,12 +98,17 @@ docker exec "$NAME" bash -lc ": > '$JTI'; chown postgres:postgres '$JTI'"
 echo "== A. strict parser"
 expect parser_good ok
 for v in malformed trailing unknown_key substring_confusion escaped missing_generated_at revoked_listed wrong_type; do
-  mkstate "$WORK/s.json" "$v"; put_state "$WORK/s.json"; expect "parser_$v" fail
+  case $v in
+    revoked_listed) r="state:revoked" ;;
+    substring_confusion) r="state:not_active" ;;
+    *) r="session check denied (state:" ;;
+  esac
+  mkstate "$WORK/s.json" "$v"; put_state "$WORK/s.json"; expect "parser_$v" fail "$r"
 done
 mkstate "$WORK/s.json" big; put_state "$WORK/s.json"
 SZ=$(stat -c %s "$WORK/s.json"); echo "big state bytes=$SZ"
 gucset pg_appsec.oauth_session_state_max_bytes 4096
-expect parser_oversized fail
+expect parser_oversized fail "session check denied (state:"
 gucreset pg_appsec.oauth_session_state_max_bytes
 expect parser_same_file_under_default_cap ok
 
@@ -115,16 +125,17 @@ grep -q '^live-jti-1 ' "$WORK/jti_after.txt" || { echo "FAIL live jti dropped"; 
 grep -Eq '^jti-p[0-9]+-[0-9a-f]+ [0-9]+$' "$WORK/jti_after.txt" || { echo "FAIL new jti not recorded with exp"; exit 1; }
 echo "PASS jti_pruned_by_exp"
 if try_login "$REPLAY"; then echo "FAIL jti replay accepted"; exit 1; fi
+sleep 0.2; docker logs --tail 6 "$NAME" 2>&1 | grep -q "jti denied" || { echo "FAIL replay denied for wrong reason"; exit 1; }
 echo "PASS jti_replay_after_prune (fail)"
 printf 'live-a %s\nlive-b %s\nlive-c %s\n' $((NOW + 4000)) $((NOW + 4000)) $((NOW + 4000)) > "$WORK/jti.txt"
 docker cp "$WORK/jti.txt" "$NAME:$JTI"; docker exec "$NAME" chown postgres:postgres "$JTI"
 gucset pg_appsec.oauth_jti_max_entries 3
-expect jti_cap_exceeded fail
+expect jti_cap_exceeded fail "jti store rejected"
 gucreset pg_appsec.oauth_jti_max_entries
 expect jti_cap_restored ok
 printf 'garbage-line-without-exp\n%0600d\n' 0 > "$WORK/jti.txt"
 docker cp "$WORK/jti.txt" "$NAME:$JTI"; docker exec "$NAME" chown postgres:postgres "$JTI"
-expect jti_overlong_line fail
+expect jti_overlong_line fail "jti denied"
 docker exec "$NAME" bash -lc ": > '$JTI'"
 
 echo "== C. live oauth-state-sync worker"
@@ -169,7 +180,7 @@ done
 [[ -n $DENIED ]] || { echo "FAIL revoked session still accepted after 5s"; exit 1; }
 python3 -c "import sys; sys.exit(0 if $DENIED <= 5 else 1)" || { echo "FAIL revocation took ${DENIED}s"; exit 1; }
 echo "PASS sync_revoke_denied_within_5s (${DENIED}s)"
-expect sync_revoke_stays_denied fail
+expect sync_revoke_stays_denied fail "session check denied (state:"
 
 psqlc -c "UPDATE appsec.sessions SET revoked_at = NULL WHERE session_id = '$SID'"
 OK=""
@@ -181,7 +192,7 @@ gucset pg_appsec.oauth_session_state_max_age_secs 3
 expect sync_worker_alive_short_max_age ok
 docker exec "$NAME" bash -lc "kill \$(cat '$DATADIR/sync/worker.pid')"
 sleep 5
-expect sync_worker_killed_fails_closed fail
+expect sync_worker_killed_fails_closed fail "session check denied (state:"
 start_worker
 sleep 1
 expect sync_worker_restarted_recovers ok
