@@ -477,12 +477,27 @@ jti_denied(const char *jti)
 static void
 jti_remember(const char *jti)
 {
+	FILE	   *f;
+
 	if (!jti || jti[0] == '\0')
 		return;
 	if (jti_seen_n < JTI_SEEN_CAP)
 	{
 		snprintf(jti_seen[jti_seen_n], MAX_CLAIM, "%s", jti);
 		jti_seen_n++;
+	}
+	/*
+	 * Persist across backends: append to the denylist/seen file when
+	 * configured so jti replay fails on another postgres worker.
+	 */
+	if (g_jti_denylist_file && g_jti_denylist_file[0] != '\0')
+	{
+		f = fopen(g_jti_denylist_file, "a");
+		if (f)
+		{
+			fprintf(f, "%s\n", jti);
+			fclose(f);
+		}
 	}
 }
 
