@@ -32,7 +32,7 @@ pg_appsec.oauth_required_scope = '\''pg_appsec'\''
 pg_appsec.oauth_pubkey_file = '\''/tmp/testdata/ed25519_public.pem'\''
 pg_appsec.oauth_jwks_file = '\''/tmp/testdata/jwks_kid.json'\''
 pg_appsec.oauth_session_state_file = '\''/tmp/testdata/session_state.json'\''
-pg_appsec.oauth_jti_denylist_file = '\''/var/lib/postgresql/data/jti_seen.txt'\''
+pg_appsec.oauth_jti_denylist_file = '\''/tmp/jti_seen.txt'\''
 GUC
 TMP=$(mktemp)
 {
@@ -43,7 +43,7 @@ TMP=$(mktemp)
 } > "$TMP"
 cp "$TMP" "$HBA"
 '
-docker exec "$NAME" bash -lc 'touch /var/lib/postgresql/data/jti_seen.txt; chown postgres:postgres /var/lib/postgresql/data/jti_seen.txt; chmod 666 /var/lib/postgresql/data/jti_seen.txt' || true
+docker exec "$NAME" bash -lc 'touch /tmp/jti_seen.txt; chown postgres:postgres /tmp/jti_seen.txt; chmod 666 /tmp/jti_seen.txt' || true
 docker restart "$NAME"
 for i in $(seq 1 60); do docker exec "$NAME" pg_isready -U postgres && break; sleep 1; done
 PRELOAD=$(docker exec "$NAME" psql -U postgres -Atc "SHOW shared_preload_libraries")
@@ -72,7 +72,7 @@ run_case() {
 TD=/tmp/testdata
 run_case valid "$TD/token_valid.txt" ok
 # Simulate auth-service/validator persistence of used jti for cross-backend replay.
-echo test-jti >> /var/lib/postgresql/data/jti_seen.txt
+echo test-jti >> /tmp/jti_seen.txt
 run_case jti_replay "$TD/token_valid.txt" fail
 run_case badsig "$TD/token_badsig.txt" fail
 run_case expired "$TD/token_expired.txt" fail
