@@ -130,8 +130,8 @@ auth_file = /etc/pgbouncer/userlist.txt
 server_tls_sslmode = require
 server_tls_ca_file = /etc/pgbouncer/ca.crt
 client_tls_sslmode = require
-client_tls_cert_file = /etc/pgbouncer/client.crt
-client_tls_key_file = /etc/pgbouncer/client.key
+client_tls_cert_file = /etc/pgbouncer/server.crt
+client_tls_key_file = /etc/pgbouncer/server.key
 client_tls_ca_file = /etc/pgbouncer/ca.crt
 server_reset_query = DISCARD ALL
 server_reset_query_always = 1
@@ -146,8 +146,8 @@ docker run -d --name pgappsec-bouncer --network "$NET" -p 16432:6432 \
   -v "$WORKDIR/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro" \
   -v "$WORKDIR/userlist.txt:/etc/pgbouncer/userlist.txt:ro" \
   -v "$WORKDIR/ca.crt:/etc/pgbouncer/ca.crt:ro" \
-  -v "$WORKDIR/client.crt:/etc/pgbouncer/client.crt:ro" \
-  -v "$WORKDIR/client.key:/etc/pgbouncer/client.key:ro" \
+  -v "$WORKDIR/server.crt:/etc/pgbouncer/server.crt:ro" \
+  -v "$WORKDIR/server.key:/etc/pgbouncer/server.key:ro" \
   "$PB_IMG"
 
 # Client from host against published port (avoids cross-container DNS issues)
@@ -159,19 +159,19 @@ export PGSSLMODE=require
 psql_via() {
   local user=$1 pass=$2
   shift 2
-  PGPASSWORD="$pass" psql "host=127.0.0.1 port=16432 dbname=appsec_test user=$user sslmode=require" -v ON_ERROR_STOP=1 "$@"
+  PGPASSWORD="$pass" psql "host=127.0.0.1 port=16432 dbname=appsec_test user=$user sslmode=verify-ca sslrootcert=${WORKDIR}/ca.crt" -v ON_ERROR_STOP=1 "$@"
 }
 
 ready=0
 for i in $(seq 1 40); do
-  if PGPASSWORD="$PASS_A" psql "host=127.0.0.1 port=16432 dbname=appsec_test user=$ROLE_A sslmode=require" -Atc 'SELECT 1' >/dev/null 2>&1; then
+  if PGPASSWORD="$PASS_A" psql "host=127.0.0.1 port=16432 dbname=appsec_test user=$ROLE_A sslmode=verify-ca sslrootcert=$WORKDIR/ca.crt" -Atc 'SELECT 1' >/dev/null 2>&1; then
     ready=1; break
   fi
   sleep 1
 done
 if [[ $ready -ne 1 ]]; then
   echo 'FAIL pgbouncer never accepted connections'
-  PGPASSWORD="$PASS_A" psql "host=127.0.0.1 port=16432 dbname=appsec_test user=$ROLE_A sslmode=require" -Atc 'SELECT 1' 2>&1 || true
+  PGPASSWORD="$PASS_A" psql "host=127.0.0.1 port=16432 dbname=appsec_test user=$ROLE_A sslmode=verify-ca sslrootcert=$WORKDIR/ca.crt" -Atc 'SELECT 1' 2>&1 || true
   docker logs pgappsec-bouncer 2>&1 | tail -40 || true
   exit 1
 fi
@@ -193,7 +193,7 @@ echo PASS ab_isolation
 echo '== pgbouncer_auth no data =='
 set +e
 OUT=$(docker exec -e PGPASSWORD="$AUTH_PASS" pgappsec-pg \
-  psql "host=127.0.0.1 port=5432 dbname=appsec_test user=pgbouncer_auth sslmode=require" \
+  psql "host=127.0.0.1 port=5432 dbname=appsec_test user=pgbouncer_auth sslmode=verify-ca sslrootcert=$WORKDIR/ca.crt" \
   -Atc "SELECT count(*) FROM appsec.documents" 2>&1)
 RC=$?
 set -e
