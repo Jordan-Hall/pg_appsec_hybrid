@@ -108,3 +108,11 @@ Assertions are minted only by provisioner/operator with `appsec.gateway_hmac_key
 - Prefer `appsec.assume_session_local(assertion)` inside an explicit `BEGIN`…`COMMIT` (`SET LOCAL ROLE`; ends with the transaction).
 - `appsec.assume_session(assertion)` uses session-scoped `SET ROLE` for autocommit clients; after `RESET ROLE` the gateway login has **zero** table privileges (CI covers spoof/replay/escape).
 - Outside an assumed session, `appsec_gateway` must remain without DML/SELECT on protected tables.
+
+## TEMP and owners (round 4)
+
+`TEMPORARY` on the database is revoked from PUBLIC, so `app_s_*` cannot create
+temp tables (which could otherwise shadow objects via `pg_temp`). The
+`CREATE TABLE` event-trigger function is now `SECURITY INVOKER` (runs as the
+table owner who issued the DDL), and no appsec `SECURITY DEFINER` function is
+owned by a superuser.

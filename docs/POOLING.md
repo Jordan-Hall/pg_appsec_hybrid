@@ -56,3 +56,10 @@ Per-session roles increase PostgreSQL role and PgBouncer pool cardinality. Load-
 2. After revoke + `NOLOGIN`, new pool connections for A are denied; an existing login sees `uid()` NULL.
 3. Transaction mode + `DISCARD ALL` prevents GUC leakage from A to B.
 4. `pgbouncer_auth` cannot `SELECT` application data tables.
+
+## Session-role minting (round 4)
+
+Session roles are created only through `appsec.create_session_role(...)`
+(owned by NOLOGIN `appsec_role_admin`, CREATEROLE-only). The pooler E2E mints
+its two session roles through this helper; `appsec_provisioner` no longer
+holds CREATEROLE.

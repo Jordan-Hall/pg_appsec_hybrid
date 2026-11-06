@@ -11,6 +11,7 @@ files = [
     "007_hardening.sql",
     "008_secdefiner_audit_and_pool.sql",
     "009_close_remaining_risks.sql",
+    "010_least_privilege_owners.sql",
 ]
 parts = []
 for name in files:

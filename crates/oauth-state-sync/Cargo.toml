@@ -18,6 +18,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "tim
 thiserror = "2"
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
+ed25519-dalek = "2"
+hex = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]

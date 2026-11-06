@@ -72,7 +72,8 @@ jobs:
         run: |
           for f in sql/001_roles.sql sql/002_schema.sql sql/003_policies.sql \
                    sql/004_identity_sessions_acl.sql sql/005_schema_security.sql \
-                   sql/006_custom_rls.sql sql/007_hardening.sql sql/008_secdefiner_audit_and_pool.sql                    sql/009_close_remaining_risks.sql; do
+                   sql/006_custom_rls.sql sql/007_hardening.sql sql/008_secdefiner_audit_and_pool.sql \
+                   sql/009_close_remaining_risks.sql sql/010_least_privilege_owners.sql; do
             psql -v ON_ERROR_STOP=1 -f "$f"
           done
       - name: Run adversarial SQL tests
@@ -85,6 +86,8 @@ jobs:
         run: psql -v ON_ERROR_STOP=1 -f tests/hardening_regression.sql
       - name: Remaining risks regression (SET LOCAL, mint harden, audit verify)
         run: psql -v ON_ERROR_STOP=1 -f tests/remaining_risks_regression.sql
+      - name: Least-privilege owners + TEMP + audit checkpoint regression
+        run: psql -v ON_ERROR_STOP=1 -f tests/least_privilege_regression.sql
 
   oauth-validator:
     name: OAuth validator E2E (PG18)
@@ -93,8 +96,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install host build deps
         run: sudo apt-get update && sudo apt-get install -y build-essential libssl-dev python3-cryptography
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - name: Build oauth-state-sync worker
+        run: cargo build --release -p pg-appsec-oauth-state-sync
       - name: Docker PG18 OAuth matrix
         run: bash oauth-validator/ci_docker_e2e.sh
+      - name: Strict parser, jti prune/cap, live sync worker, signed audit checkpoints
+        run: bash oauth-validator/ci_sync_e2e.sh
 
   pooler-e2e:
     name: PgBouncer pooler E2E

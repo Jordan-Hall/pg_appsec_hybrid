@@ -9,6 +9,8 @@ DO $$ BEGIN
   CREATE ROLE app_gw_login2 LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'gw-test-pass';
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 GRANT appsec_app_base TO app_s_cccccccccccccccccccccccccccccccc;
+-- fixture role created by superuser: adopt like migration 010 does
+GRANT app_s_cccccccccccccccccccccccccccccccc TO appsec_role_admin WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;
 GRANT appsec_gateway TO app_gw_login2;
 
 INSERT INTO appsec.tenants(tenant_id,slug,display_name,status) VALUES

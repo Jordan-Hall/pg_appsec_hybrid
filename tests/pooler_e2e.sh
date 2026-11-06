@@ -63,7 +63,7 @@ docker exec -e PGPASSWORD=postgres pgappsec-pg \
 for f in sql/001_roles.sql sql/002_schema.sql sql/003_policies.sql \
          sql/004_identity_sessions_acl.sql sql/005_schema_security.sql \
          sql/006_custom_rls.sql sql/007_hardening.sql sql/008_secdefiner_audit_and_pool.sql \
-         sql/009_close_remaining_risks.sql; do
+         sql/009_close_remaining_risks.sql sql/010_least_privilege_owners.sql; do
   docker exec -i pgappsec-pg psql -U postgres -d appsec_test -v ON_ERROR_STOP=1 < "$ROOT/$f" >/dev/null
 done
 
@@ -74,13 +74,10 @@ DO \$\$ BEGIN
 EXCEPTION WHEN duplicate_object THEN ALTER ROLE pgbouncer_auth PASSWORD '$AUTH_PASS';
 END \$\$;
 GRANT appsec_pool_auth TO pgbouncer_auth;
-DO \$\$ BEGIN
-  CREATE ROLE $ROLE_A LOGIN PASSWORD '$PASS_A' INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-EXCEPTION WHEN duplicate_object THEN ALTER ROLE $ROLE_A PASSWORD '$PASS_A'; END \$\$;
-DO \$\$ BEGIN
-  CREATE ROLE $ROLE_B LOGIN PASSWORD '$PASS_B' INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-EXCEPTION WHEN duplicate_object THEN ALTER ROLE $ROLE_B PASSWORD '$PASS_B'; END \$\$;
-GRANT appsec_app_base TO $ROLE_A, $ROLE_B;
+SET password_encryption = 'scram-sha-256';
+-- Real mint path: non-superuser appsec_role_admin creates + hardens session roles.
+SELECT appsec.create_session_role('$ROLE_A', '$PASS_A', now() + interval '1 day', 2);
+SELECT appsec.create_session_role('$ROLE_B', '$PASS_B', now() + interval '1 day', 2);
 SELECT appsec.harden_session_role('$ROLE_A', now() + interval '1 day', 2);
 SELECT appsec.harden_session_role('$ROLE_B', now() + interval '1 day', 2);
 INSERT INTO appsec.tenants(tenant_id,slug,display_name,status) VALUES

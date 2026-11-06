@@ -384,17 +384,11 @@ impl AuthService {
         sqlx::query("SET LOCAL password_encryption='scram-sha-256'")
             .execute(&mut *tx)
             .await?;
-        let create_role: String = sqlx::query_scalar("SELECT format('CREATE ROLE %I LOGIN PASSWORD %L VALID UNTIL %L INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS', $1::name, $2, $3)")
-            .bind(&role).bind(&verifier).bind(refresh_expires).fetch_one(&mut *tx).await?;
-        sqlx::query(&create_role).execute(&mut *tx).await?;
-        let grant_base: String =
-            sqlx::query_scalar("SELECT format('GRANT appsec_app_base TO %I', $1::name)")
-                .bind(&role)
-                .fetch_one(&mut *tx)
-                .await?;
-        sqlx::query(&grant_base).execute(&mut *tx).await?;
-        sqlx::query("SELECT appsec.harden_session_role($1::name, $2::timestamptz, 2)")
+        // Role DDL goes through appsec_role_admin-owned helpers (PG16+ CREATEROLE
+        // + ADMIN OPTION); the provisioner itself holds no CREATEROLE.
+        sqlx::query("SELECT appsec.create_session_role($1::name, $2, $3::timestamptz, 2)")
             .bind(&role)
+            .bind(&verifier)
             .bind(refresh_expires)
             .execute(&mut *tx)
             .await?;
@@ -812,14 +806,11 @@ async fn alter_role_login(
     if !is_generated_role(role) {
         return Err(AuthError::AccountUnavailable);
     }
-    let command: String = sqlx::query_scalar(
-        "SELECT format('ALTER ROLE %I %s', $1::name, CASE WHEN $2 THEN 'LOGIN' ELSE 'NOLOGIN' END)",
-    )
-    .bind(role)
-    .bind(enabled)
-    .fetch_one(&mut **tx)
-    .await?;
-    sqlx::query(&command).execute(&mut **tx).await?;
+    sqlx::query("SELECT appsec.set_session_role_login($1::name, $2)")
+        .bind(role)
+        .bind(enabled)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
@@ -831,13 +822,11 @@ async fn alter_role_valid_until(
     if !is_generated_role(role) {
         return Err(AuthError::AccountUnavailable);
     }
-    let command: String =
-        sqlx::query_scalar("SELECT format('ALTER ROLE %I VALID UNTIL %L', $1::name, $2)")
-            .bind(role)
-            .bind(expires)
-            .fetch_one(&mut **tx)
-            .await?;
-    sqlx::query(&command).execute(&mut **tx).await?;
+    sqlx::query("SELECT appsec.harden_session_role($1::name, $2::timestamptz, 2)")
+        .bind(role)
+        .bind(expires)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
@@ -849,13 +838,11 @@ async fn alter_role_password(
     if !is_generated_role(role) {
         return Err(AuthError::AccountUnavailable);
     }
-    let command: String =
-        sqlx::query_scalar("SELECT format('ALTER ROLE %I PASSWORD %L', $1::name, $2)")
-            .bind(role)
-            .bind(verifier)
-            .fetch_one(&mut **tx)
-            .await?;
-    sqlx::query(&command).execute(&mut **tx).await?;
+    sqlx::query("SELECT appsec.set_session_role_password($1::name, $2)")
+        .bind(role)
+        .bind(verifier)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 

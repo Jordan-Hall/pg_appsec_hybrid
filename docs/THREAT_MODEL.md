@@ -82,3 +82,22 @@ TLS with certificate verification; secrets in a secret manager; short-lived acce
 | Audit trail | Append-only hash-chained `security_audit_chain` + `verify_security_audit_chain` + optional `export_audit_chain_head` WORM anchor | Silent ACL/login tampering (detection; superuser can still rewrite if triggers disabled) |
 | Database ACL ceiling | `database_acl_caps.max_access_level` | Over-privileged ACL grants |
 | Public schema | `REVOKE CREATE` from PUBLIC; TEMP revoked where possible | Object object persistence / temp abuse |
+
+## Hardening round 4 (strict validator state, live sync, least-privilege owners, TEMP, signed checkpoints)
+
+| Area | What is protected | From whom | Mechanism | CI proof |
+|---|---|---|---|---|
+| Session-state parsing | Connect-time allow/deny decision | Anyone able to influence the state file contents (buggy exporter, partial writes, crafted entries) | Real JSON tokenizer (vendored jsmn v1.1.0, pinned by SHA-256), strict schema: exactly `generated_at` (UTC), `active_sessions` (`sid`+`role` required, only known keys), `revoked_sids`, `denied_jtis`; no escapes, no duplicates, no trailing data, size cap `pg_appsec.oauth_session_state_max_bytes` (default 8 MiB). Any error → login denied. Allow requires sid **and** role in the *same* active entry. | `ci_sync_e2e.sh` A: malformed, trailing, unknown key, substring confusion, escapes, missing generated_at, wrong type, revoked, oversized |
+| jti replay file | Single-use access tokens | Token replay across backends | `"<jti> <exp>"` lines, exact match, `flock` + atomic rename, expired entries pruned on every login, `pg_appsec.oauth_jti_max_entries` (default 100000) cap → fail closed; over-long lines → fail closed | B: prune, replay, cap, over-long |
+| Revocation latency | Revoked sessions cannot open new connections | Attacker holding a still-unexpired access token | `oauth-state-sync` LISTEN/NOTIFY + 1 s poll → atomic file; validator max-age fail-closed | C: revoke → denied ≤ 5 s (live PG + worker); worker killed → denied after max-age; restart → recovers |
+| Role-management helpers | Ability to create/alter session roles | Compromise of any `SECURITY DEFINER` function owner | Owned by `appsec_role_admin` (NOLOGIN, CREATEROLE only, PG16+ semantics: manages only roles it holds ADMIN on, cannot use their privileges); `appsec_provisioner` no longer has CREATEROLE; no appsec `SECURITY DEFINER` function is superuser-owned | `least_privilege_regression.sql`, pooler E2E mints through the helper |
+| TEMP | Temp-table/temp-function tricks by app sessions | Session roles | `REVOKE TEMPORARY ON DATABASE <db> FROM PUBLIC` (unconditional in 010). Grant `TEMP` explicitly to a named role only if an application truly needs it. | `app_s_*` `CREATE TEMP TABLE` → 42501 |
+| Audit chain vs superuser | Detects history rewrite even if the chain is recomputed consistently | Superuser / DB-host attacker | Worker appends Ed25519-signed head checkpoints (`--audit-checkpoint-file`, `--audit-signing-key-file`, optional `--checkpoint-stdout`); `--verify-checkpoint-with <pub>` checks the signature and `appsec.verify_audit_chain_against_checkpoint` | D: OK, signature tamper, wrong key, consistent superuser rewrite detected |
+
+**WORM shipping:** keep the signing seed off the database host if possible
+(or at least unreadable by the `postgres` OS user), ship the checkpoint file
+or stdout to append-only storage (S3 Object Lock in compliance mode, Azure
+immutable blob, a remote syslog/SIEM), and keep the public key with the
+auditors. A superuser can still delete *new* (post-checkpoint) events
+undetected until the next checkpoint, and can stop the worker; alert on
+checkpoint gaps.

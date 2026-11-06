@@ -58,7 +58,7 @@ state = {
     "denied_jtis": [],
 }
 (td / "session_state.json").write_text(json.dumps(state, separators=(",", ":")))
-(td / "session_state_revoked.json").write_text(json.dumps({"active_sessions": [], "revoked_sids": [sid], "denied_jtis": ["denied-jti"]}, separators=(",", ":")))
+(td / "session_state_revoked.json").write_text(json.dumps({"generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "active_sessions": [], "revoked_sids": [sid], "denied_jtis": ["denied-jti"]}, separators=(",", ":")))
 (td / "jti_denylist.txt").write_text("denied-jti\n")
 # JWKS with kid for rotation
 pub_pem = pub_path.read_text()
@@ -87,3 +87,9 @@ def mint_kid(**claims):
 (td / "token_revoked_sid.txt").write_text(mint(sub="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", sid=sid, preferred_username=role, jti="jti-rev-check"))
 (td / "token_stale_probe.txt").write_text(mint(sub="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", sid=sid, preferred_username=role, jti="jti-stale-probe"))
 print("minted tokens for", role)
+
+# Fresh single-use probe tokens for parser / jti / sync-worker E2E phases.
+import secrets as _secrets
+_run = _secrets.token_hex(4)
+for _n in range(1, 81):
+    (td / f"token_p{_n}.txt").write_text(mint(sub="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", sid=sid, preferred_username=role, jti=f"jti-p{_n}-{_run}"))

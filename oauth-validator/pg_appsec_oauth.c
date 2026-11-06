@@ -35,6 +35,15 @@
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <sys/file.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdint.h>
+
+#define JSMN_STATIC
+#define JSMN_STRICT
+#include "jsmn.h"
 
 PG_MODULE_MAGIC;
 
@@ -54,9 +63,8 @@ static char *g_issuer_map_file = NULL;
 static int	g_session_state_max_age = 120;
 
 #define MAX_CLAIM 512
-#define JTI_SEEN_CAP 4096
-static char	jti_seen[JTI_SEEN_CAP][MAX_CLAIM];
-static int	jti_seen_n = 0;
+static int	g_session_state_max_bytes = 8 * 1024 * 1024;
+static int	g_jti_max_entries = 100000;
 
 
 typedef struct JwtParts
@@ -395,41 +403,241 @@ file_contains_line_or_json_value(const char *path, const char *needle)
 	return false;
 }
 
+/* ---- Strict session-state parsing (vendored jsmn v1.1.0, see jsmn.h) ---- */
+#define SESSION_STATE_MAX_TOKENS 400000
+
 static bool
-session_state_allows(const char *sid, const char *role)
+jtok_eq(const char *buf, const jsmntok_t *t, const char *s)
+{
+	size_t		n = strlen(s);
+
+	return t->type == JSMN_STRING && (size_t) (t->end - t->start) == n
+		&& memcmp(buf + t->start, s, n) == 0;
+}
+
+/* Returns index after the subtree rooted at i, or -1 on structural error. */
+static int
+jtok_skip(const jsmntok_t *t, int i, int ntok)
+{
+	int			j,
+				k,
+				n;
+
+	if (i < 0 || i >= ntok)
+		return -1;
+	n = t[i].size;
+	j = i + 1;
+	if (t[i].type == JSMN_OBJECT)
+	{
+		for (k = 0; k < n; k++)
+		{
+			if (j >= ntok || t[j].type != JSMN_STRING)
+				return -1;
+			j = jtok_skip(t, j + 1, ntok);
+			if (j < 0)
+				return -1;
+		}
+	}
+	else if (t[i].type == JSMN_ARRAY)
+	{
+		for (k = 0; k < n; k++)
+		{
+			j = jtok_skip(t, j, ntok);
+			if (j < 0)
+				return -1;
+		}
+	}
+	return j;
+}
+
+/* Strings in the state file must be plain (no escapes, no control chars). */
+static bool
+jtok_plain_string(const char *buf, const jsmntok_t *t)
+{
+	int			p;
+
+	if (t->type != JSMN_STRING)
+		return false;
+	for (p = t->start; p < t->end; p++)
+		if (buf[p] == '\\' || (unsigned char) buf[p] < 0x20)
+			return false;
+	return true;
+}
+
+static bool
+jtok_is_null(const char *buf, const jsmntok_t *t)
+{
+	return t->type == JSMN_PRIMITIVE && t->end - t->start == 4
+		&& memcmp(buf + t->start, "null", 4) == 0;
+}
+
+/* Array of plain strings; sets *hit if any element equals needle. */
+static int
+jparse_string_array(const char *buf, const jsmntok_t *t, int i, int ntok,
+					const char *needle, bool *hit)
+{
+	int			k,
+				j;
+
+	if (i >= ntok || t[i].type != JSMN_ARRAY)
+		return -1;
+	j = i + 1;
+	for (k = 0; k < t[i].size; k++)
+	{
+		if (j >= ntok || !jtok_plain_string(buf, &t[j]))
+			return -1;
+		if (needle && needle[0] && jtok_eq(buf, &t[j], needle))
+			*hit = true;
+		j++;
+	}
+	return j;
+}
+
+static int
+jparse_active_sessions(const char *buf, const jsmntok_t *t, int i, int ntok,
+					   const char *sid, const char *role, bool *hit)
+{
+	int			k,
+				f,
+				j;
+
+	if (i >= ntok || t[i].type != JSMN_ARRAY)
+		return -1;
+	j = i + 1;
+	for (k = 0; k < t[i].size; k++)
+	{
+		bool		have_sid = false,
+					have_role = false,
+					sid_ok = false,
+					role_ok = false;
+		int			nf;
+
+		if (j >= ntok || t[j].type != JSMN_OBJECT)
+			return -1;
+		nf = t[j].size;
+		j++;
+		for (f = 0; f < nf; f++)
+		{
+			const jsmntok_t *key,
+					   *val;
+
+			if (j + 1 >= ntok || !jtok_plain_string(buf, &t[j]))
+				return -1;
+			key = &t[j];
+			val = &t[j + 1];
+			if (jtok_eq(buf, key, "sid") || jtok_eq(buf, key, "role"))
+			{
+				bool		is_sid = jtok_eq(buf, key, "sid");
+
+				if (!jtok_plain_string(buf, val))
+					return -1;
+				if (is_sid)
+				{
+					if (have_sid)
+						return -1;	/* duplicate key */
+					have_sid = true;
+					sid_ok = jtok_eq(buf, val, sid);
+				}
+				else
+				{
+					if (have_role)
+						return -1;
+					have_role = true;
+					role_ok = jtok_eq(buf, val, role);
+				}
+			}
+			else if (jtok_eq(buf, key, "user_id") || jtok_eq(buf, key, "tenant_id")
+					 || jtok_eq(buf, key, "expires_at") || jtok_eq(buf, key, "jti"))
+			{
+				if (!jtok_plain_string(buf, val) && !jtok_is_null(buf, val))
+					return -1;
+			}
+			else
+				return -1;		/* unknown key: strict schema */
+			j += 2;
+		}
+		if (!have_sid || !have_role)
+			return -1;
+		if (sid_ok && role_ok)
+			*hit = true;
+	}
+	return j;
+}
+
+static bool
+parse_generated_at(const char *buf, const jsmntok_t *t, time_t *out)
+{
+	char		tsbuf[64];
+	struct tm	tm;
+	int			len = t->end - t->start;
+
+	if (!jtok_plain_string(buf, t) || len < 19 || len >= (int) sizeof(tsbuf))
+		return false;
+	memcpy(tsbuf, buf + t->start, (size_t) len);
+	tsbuf[len] = '\0';
+	/* Require UTC: trailing Z or +00:00 / +00 */
+	if (!(tsbuf[len - 1] == 'Z' || (len >= 6 && strcmp(tsbuf + len - 6, "+00:00") == 0)
+		  || (len >= 3 && strcmp(tsbuf + len - 3, "+00") == 0)))
+		return false;
+	tsbuf[19] = '\0';
+	memset(&tm, 0, sizeof(tm));
+	if (strptime(tsbuf, "%Y-%m-%dT%H:%M:%S", &tm) == NULL)
+		return false;
+	*out = timegm(&tm);
+	return *out > 0;
+}
+
+/*
+ * Fail-closed connect-time check. Schema (all keys required, no others):
+ *   {"generated_at": "<RFC3339 UTC>",
+ *    "active_sessions": [{"sid","role", optional user_id/tenant_id/expires_at/jti}],
+ *    "revoked_sids": ["..."], "denied_jtis": ["..."]}
+ */
+static bool
+session_state_allows(const char *sid, const char *role, const char *jti)
 {
 	FILE	   *f;
 	char	   *buf;
 	long		sz;
-	bool		ok = false;
-	char		role_needle[128];
-	char		sid_needle[128];
 	struct stat st;
-	time_t		now;
-	const char *gat;
-	char		tsbuf[64];
-	struct tm	tm;
-	time_t		generated;
+	time_t		now,
+				generated = 0;
+	jsmn_parser p;
+	jsmntok_t  *t;
+	int			ntok,
+				i,
+				k,
+				j;
+	bool		seen_gen = false,
+				seen_act = false,
+				seen_rev = false,
+				seen_den = false;
+	bool		active_hit = false,
+				revoked_hit = false,
+				jti_hit = false;
+	bool		ok = false;
 
 	/* If no state file configured, allow (RLS still enforces post-connect). */
 	if (!g_session_state_file || g_session_state_file[0] == '\0')
 		return true;
 	if (stat(g_session_state_file, &st) != 0)
-		return false;			/* fail closed when configured but missing */
+		return false;
 	now = time(NULL);
 	if (g_session_state_max_age > 0
 		&& st.st_mtime + g_session_state_max_age < now)
 		return false;			/* fail closed: sync worker stale */
+	if (st.st_size <= 0 || st.st_size > (off_t) g_session_state_max_bytes)
+		return false;			/* fail closed: empty or oversized */
 	f = fopen(g_session_state_file, "r");
 	if (!f)
-		return false;			/* fail closed when configured but missing */
+		return false;
 	if (fseek(f, 0, SEEK_END) != 0)
 	{
 		fclose(f);
 		return false;
 	}
 	sz = ftell(f);
-	if (sz <= 0 || sz > 8 * 1024 * 1024)
+	if (sz <= 0 || sz > (long) g_session_state_max_bytes)
 	{
 		fclose(f);
 		return false;
@@ -444,112 +652,234 @@ session_state_allows(const char *sid, const char *role)
 	}
 	fclose(f);
 	buf[sz] = '\0';
-
-	/* Prefer JSON generated_at when present (more reliable than mtime across mounts). */
-	gat = strstr(buf, "\"generated_at\"");
-	if (gat && g_session_state_max_age > 0)
+	if (memchr(buf, '\0', (size_t) sz) != NULL)
 	{
-		const char *q1 = strchr(gat + 14, '"');
-		const char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
-
-		if (q1 && q2 && (q2 - q1 - 1) < (long) sizeof(tsbuf))
-		{
-			memset(tsbuf, 0, sizeof(tsbuf));
-			memcpy(tsbuf, q1 + 1, (size_t) (q2 - q1 - 1));
-			/* Accept RFC3339 UTC (...Z) by zeroing fractional/zone for timegm-ish parse of YYYY-MM-DDTHH:MM:SS */
-			if (strlen(tsbuf) >= 19)
-			{
-				tsbuf[19] = '\0';
-				memset(&tm, 0, sizeof(tm));
-				if (strptime(tsbuf, "%Y-%m-%dT%H:%M:%S", &tm) != NULL)
-				{
-#if defined(__linux__)
-					generated = timegm(&tm);
-#else
-					generated = timegm(&tm);
-#endif
-					if (generated > 0 && generated + g_session_state_max_age < now)
-					{
-						pfree(buf);
-						return false;
-					}
-				}
-			}
-		}
+		pfree(buf);
+		return false;
 	}
 
-	/* Revoked list wins. */
-	snprintf(sid_needle, sizeof(sid_needle), "%s", sid);
-	if (strstr(buf, "\"revoked_sids\"") && strstr(buf, sid_needle))
+	jsmn_init(&p);
+	ntok = jsmn_parse(&p, buf, (size_t) sz, NULL, 0);
+	if (ntok <= 0 || ntok > SESSION_STATE_MAX_TOKENS)
 	{
-		/* crude: if sid appears inside revoked_sids array region — treat as deny if listed after key */
-		const char *rev = strstr(buf, "\"revoked_sids\"");
-		const char *act = strstr(buf, "\"active_sessions\"");
-		const char *hit = strstr(rev, sid);
-
-		if (hit && (!act || hit < act || (act && hit < strstr(act, "]") && rev < act)))
-		{
-			/* if hit is between revoked_sids and next major key */
-			const char *end = strchr(rev, ']');
-
-			if (end && hit < end)
-			{
-				pfree(buf);
-				return false;
-			}
-		}
+		pfree(buf);
+		return false;			/* malformed or too many tokens */
 	}
+	t = palloc(sizeof(jsmntok_t) * (size_t) ntok);
+	jsmn_init(&p);
+	if (jsmn_parse(&p, buf, (size_t) sz, t, (unsigned int) ntok) != ntok
+		|| t[0].type != JSMN_OBJECT
+		|| jtok_skip(t, 0, ntok) != ntok)
+		goto done;				/* trailing values / structure error */
+	for (i = t[0].end; i < sz; i++)
+		if (!isspace((unsigned char) buf[i]))
+			goto done;
 
-	snprintf(role_needle, sizeof(role_needle), "\"%s\"", role);
-	if (strstr(buf, sid) && strstr(buf, role_needle))
-		ok = true;
+	j = 1;
+	for (k = 0; k < t[0].size; k++)
+	{
+		if (j + 1 >= ntok || !jtok_plain_string(buf, &t[j]))
+			goto done;
+		if (jtok_eq(buf, &t[j], "generated_at"))
+		{
+			if (seen_gen || !parse_generated_at(buf, &t[j + 1], &generated))
+				goto done;
+			seen_gen = true;
+			j += 2;
+		}
+		else if (jtok_eq(buf, &t[j], "active_sessions"))
+		{
+			if (seen_act)
+				goto done;
+			seen_act = true;
+			j = jparse_active_sessions(buf, t, j + 1, ntok, sid, role, &active_hit);
+		}
+		else if (jtok_eq(buf, &t[j], "revoked_sids"))
+		{
+			if (seen_rev)
+				goto done;
+			seen_rev = true;
+			j = jparse_string_array(buf, t, j + 1, ntok, sid, &revoked_hit);
+		}
+		else if (jtok_eq(buf, &t[j], "denied_jtis"))
+		{
+			if (seen_den)
+				goto done;
+			seen_den = true;
+			j = jparse_string_array(buf, t, j + 1, ntok, jti, &jti_hit);
+		}
+		else
+			goto done;			/* unknown top-level key */
+		if (j < 0)
+			goto done;
+	}
+	if (!seen_gen || !seen_act || !seen_rev || !seen_den)
+		goto done;
+	if (g_session_state_max_age > 0 && generated + g_session_state_max_age < now)
+		goto done;
+	if (generated > now + g_clock_skew)
+		goto done;				/* future-dated state is suspicious */
+	ok = active_hit && !revoked_hit && !jti_hit;
+done:
+	pfree(t);
 	pfree(buf);
 	return ok;
+}
+
+/*
+ * jti seen/deny file: one entry per line, "<jti> <exp_unix>" (exp optional
+ * = permanent). Exact match only. Expired entries are pruned on every
+ * successful login; if more than g_jti_max_entries unexpired entries would
+ * remain, login fails closed.
+ */
+static bool
+jti_line_parse(char *line, char **jti_out, int64_t *exp_out)
+{
+	char	   *sp;
+	char	   *end;
+	size_t		n = strlen(line);
+
+	while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' '))
+		line[--n] = '\0';
+	if (n == 0)
+		return false;
+	sp = strchr(line, ' ');
+	*exp_out = INT64_MAX;
+	if (sp)
+	{
+		*sp = '\0';
+		errno = 0;
+		*exp_out = strtoll(sp + 1, &end, 10);
+		if (errno != 0 || *end != '\0' || end == sp + 1)
+			*exp_out = INT64_MAX;	/* unparsable exp: keep (fail closed) */
+	}
+	*jti_out = line;
+	return line[0] != '\0';
 }
 
 static bool
 jti_denied(const char *jti)
 {
-	int			i;
+	FILE	   *f;
+	char		line[MAX_CLAIM + 64];
+	time_t		now = time(NULL);
+	long		count = 0;
 
 	if (!jti || jti[0] == '\0')
 		return true;
-	if (g_jti_denylist_file && g_jti_denylist_file[0] != '\0'
-		&& file_contains_line_or_json_value(g_jti_denylist_file, jti))
-		return true;
-	for (i = 0; i < jti_seen_n; i++)
+	if (!g_jti_denylist_file || g_jti_denylist_file[0] == '\0')
+		return false;
+	f = fopen(g_jti_denylist_file, "r");
+	if (!f)
+		return errno != ENOENT;	/* unreadable → fail closed */
+	while (fgets(line, sizeof(line), f))
 	{
-		if (strcmp(jti_seen[i], jti) == 0)
-			return true;		/* replay within process lifetime */
+		char	   *e;
+		int64_t		exp;
+
+		if (strchr(line, '\n') == NULL && !feof(f))
+		{
+			fclose(f);
+			return true;		/* over-long line: fail closed */
+		}
+		if (!jti_line_parse(line, &e, &exp))
+			continue;
+		if (++count > (long) g_jti_max_entries * 4)
+		{
+			fclose(f);
+			return true;		/* runaway file: fail closed */
+		}
+		if (exp + g_clock_skew >= (int64_t) now && strcmp(e, jti) == 0)
+		{
+			fclose(f);
+			return true;
+		}
 	}
+	fclose(f);
 	return false;
 }
 
-static void
-jti_remember(const char *jti)
+/* Prune expired + append; false → fail closed (cap exceeded / IO error). */
+static bool
+jti_remember(const char *jti, int64_t exp)
 {
-	FILE	   *f;
+	char		lockpath[MAXPGPATH];
+	char		tmppath[MAXPGPATH];
+	char		line[MAX_CLAIM + 64];
+	int			lfd;
+	FILE	   *in,
+			   *out;
+	long		kept = 0;
+	bool		ok = false;
+	time_t		now = time(NULL);
 
-	if (!jti || jti[0] == '\0')
-		return;
-	if (jti_seen_n < JTI_SEEN_CAP)
+	if (!g_jti_denylist_file || g_jti_denylist_file[0] == '\0')
+		return true;
+	snprintf(lockpath, sizeof(lockpath), "%s.lock", g_jti_denylist_file);
+	snprintf(tmppath, sizeof(tmppath), "%s.tmp.%d", g_jti_denylist_file, (int) getpid());
+	lfd = open(lockpath, O_RDWR | O_CREAT, 0600);
+	if (lfd < 0)
+		return false;
+	if (flock(lfd, LOCK_EX) != 0)
 	{
-		snprintf(jti_seen[jti_seen_n], MAX_CLAIM, "%s", jti);
-		jti_seen_n++;
+		close(lfd);
+		return false;
 	}
-	/*
-	 * Persist across backends: append to the denylist/seen file when
-	 * configured so jti replay fails on another postgres worker.
-	 */
-	if (g_jti_denylist_file && g_jti_denylist_file[0] != '\0')
+	out = fopen(tmppath, "w");
+	if (!out)
+		goto unlock;
+	in = fopen(g_jti_denylist_file, "r");
+	if (in)
 	{
-		f = fopen(g_jti_denylist_file, "a");
-		if (f)
+		while (fgets(line, sizeof(line), in))
 		{
-			fprintf(f, "%s\n", jti);
-			fclose(f);
+			char	   *e;
+			int64_t		le;
+
+			if (!jti_line_parse(line, &e, &le))
+				continue;
+			if (le != INT64_MAX && le + g_clock_skew < (int64_t) now)
+				continue;		/* prune expired */
+			if (strcmp(e, jti) == 0)
+			{
+				fclose(in);
+				goto abort_tmp;	/* raced replay */
+			}
+			if (++kept >= (long) g_jti_max_entries)
+			{
+				fclose(in);
+				goto abort_tmp;	/* cap exceeded: fail closed */
+			}
+			if (le == INT64_MAX)
+				fprintf(out, "%s\n", e);
+			else
+				fprintf(out, "%s %lld\n", e, (long long) le);
 		}
+		fclose(in);
 	}
+	else if (errno != ENOENT)
+		goto abort_tmp;
+	fprintf(out, "%s %lld\n", jti, (long long) exp);
+	if (fflush(out) != 0 || fsync(fileno(out)) != 0)
+		goto abort_tmp;
+	if (fclose(out) != 0)
+	{
+		out = NULL;
+		goto abort_tmp;
+	}
+	out = NULL;
+	if (rename(tmppath, g_jti_denylist_file) != 0)
+		goto abort_tmp;
+	ok = true;
+	goto unlock;
+abort_tmp:
+	if (out)
+		fclose(out);
+	unlink(tmppath);
+unlock:
+	flock(lfd, LOCK_UN);
+	close(lfd);
+	return ok;
 }
 
 static bool
@@ -799,10 +1129,10 @@ pg_appsec_validate(const ValidatorModuleState *state,
 	 * (no SQL from the validator). When configured, missing/revoked/unknown
 	 * sessions fail closed here; RLS still re-checks every statement.
 	 */
-	if (!session_state_allows(sid, role))
+	if (!session_state_allows(sid, role, jti))
 		return true;
-
-	jti_remember(jti);
+	if (!jti_remember(jti, exp))
+		return true;			/* cap exceeded / IO error: fail closed */
 	result->authorized = true;
 	result->authn_id = pstrdup(pref);
 	return true;
@@ -896,6 +1226,22 @@ _PG_init(void)
 							&g_session_state_max_age,
 							120,
 							0, 86400,
+							PGC_SIGHUP,
+							0, NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_appsec.oauth_session_state_max_bytes",
+							"Reject login if session-state file is larger than this (fail closed)",
+							NULL,
+							&g_session_state_max_bytes,
+							8 * 1024 * 1024,
+							1024, 256 * 1024 * 1024,
+							PGC_SIGHUP,
+							0, NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_appsec.oauth_jti_max_entries",
+							"Max unexpired jti entries kept; login fails closed when exceeded",
+							NULL,
+							&g_jti_max_entries,
+							100000,
+							1, 10000000,
 							PGC_SIGHUP,
 							0, NULL, NULL, NULL);
 }
