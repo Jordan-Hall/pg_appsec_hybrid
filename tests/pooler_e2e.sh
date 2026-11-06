@@ -8,7 +8,7 @@ NET=pgappsec-net
 cleanup() {
   docker rm -f pgappsec-pg pgappsec-bouncer >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
-  rm -rf "$WORKDIR"
+  sudo rm -rf "$WORKDIR" 2>/dev/null || rm -rf "$WORKDIR" || true
 }
 trap cleanup EXIT
 
@@ -32,10 +32,12 @@ docker rm -f pgappsec-pg pgappsec-bouncer >/dev/null 2>&1 || true
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORKDIR/server.key" -out "$WORKDIR/server.crt" \
   -days 1 -subj "/CN=pgappsec-pg" >/dev/null 2>&1
 cp "$WORKDIR/server.crt" "$WORKDIR/ca.crt"
-# postgres official image runs as uid 999
-sudo chown 999:999 "$WORKDIR/server.key" "$WORKDIR/server.crt" 2>/dev/null || chown 999:999 "$WORKDIR/server.key" "$WORKDIR/server.crt" || true
-chmod 644 "$WORKDIR/server.key"
-chmod 644 "$WORKDIR/server.crt" "$WORKDIR/ca.crt"
+# Separate key copy for PgBouncer (readable by its container user)
+cp "$WORKDIR/server.key" "$WORKDIR/bouncer.key"
+chmod 644 "$WORKDIR/bouncer.key" "$WORKDIR/server.crt" "$WORKDIR/ca.crt"
+# Postgres needs key 0600 owned by its uid (999 in official image)
+chmod 600 "$WORKDIR/server.key"
+sudo chown 999:999 "$WORKDIR/server.key" 2>/dev/null || chown 999:999 "$WORKDIR/server.key" 2>/dev/null || true
 
 docker run -d --name pgappsec-pg --network "$NET" \
   -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=appsec_test \
@@ -113,7 +115,7 @@ psql -U postgres -c "SELECT pg_reload_conf()" >/dev/null
 '
 
 printf '"pgbouncer_auth" "%s"\n' "$AUTH_PASS" > "$WORKDIR/userlist.txt"
-chmod 644 "$WORKDIR/userlist.txt" "$WORKDIR/server.key"
+chmod 644 "$WORKDIR/userlist.txt"
 
 cat > "$WORKDIR/pgbouncer.ini" <<INI
 [databases]
@@ -147,7 +149,7 @@ docker run -d --name pgappsec-bouncer --network "$NET" -p 16432:6432 \
   -v "$WORKDIR/userlist.txt:/etc/pgbouncer/userlist.txt:ro" \
   -v "$WORKDIR/ca.crt:/etc/pgbouncer/ca.crt:ro" \
   -v "$WORKDIR/server.crt:/etc/pgbouncer/server.crt:ro" \
-  -v "$WORKDIR/server.key:/etc/pgbouncer/server.key:ro" \
+  -v "$WORKDIR/bouncer.key:/etc/pgbouncer/server.key:ro" \
   "$PB_IMG"
 
 psql_via() {
