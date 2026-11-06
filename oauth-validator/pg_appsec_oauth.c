@@ -9,7 +9,11 @@
  */
 #include "postgres.h"
 #include "fmgr.h"
+#ifdef USE_OAUTH_ABI_HEADER
 #include "oauth_abi.h"
+#else
+#include "libpq/oauth.h"
+#endif
 #include "miscadmin.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
@@ -28,6 +32,8 @@
 #include <time.h>
 
 PG_MODULE_MAGIC;
+
+extern PGDLLEXPORT const OAuthValidatorCallbacks *_PG_oauth_validator_module_init(void);
 
 /* GUC-backed configuration */
 static char *g_issuer = NULL;
@@ -605,7 +611,7 @@ _PG_init(void)
 							0, NULL, NULL, NULL);
 }
 
-const OAuthValidatorCallbacks *
+PGDLLEXPORT const OAuthValidatorCallbacks *
 _PG_oauth_validator_module_init(void)
 {
 	return &pg_appsec_callbacks;

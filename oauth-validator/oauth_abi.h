@@ -32,4 +32,7 @@ typedef struct OAuthValidatorCallbacks
 } OAuthValidatorCallbacks;
 
 typedef const OAuthValidatorCallbacks *(*OAuthValidatorModuleInit) (void);
+
+/* Exported by validator .so; must be default-visibility. */
+extern PGDLLEXPORT const OAuthValidatorCallbacks *_PG_oauth_validator_module_init(void);
 #endif
