@@ -593,6 +593,8 @@ parse_generated_at(const char *buf, const jsmntok_t *t, time_t *out)
  *    "active_sessions": [{"sid","role", optional user_id/tenant_id/expires_at/jti}],
  *    "revoked_sids": ["..."], "denied_jtis": ["..."]}
  */
+static const char *ss_reason = "";
+
 static bool
 session_state_allows(const char *sid, const char *role, const char *jti)
 {
@@ -621,26 +623,26 @@ session_state_allows(const char *sid, const char *role, const char *jti)
 	if (!g_session_state_file || g_session_state_file[0] == '\0')
 		return true;
 	if (stat(g_session_state_file, &st) != 0)
-		return false;
+		{ ss_reason = "state:1"; return false; }
 	now = time(NULL);
 	if (g_session_state_max_age > 0
 		&& st.st_mtime + g_session_state_max_age < now)
-		return false;			/* fail closed: sync worker stale */
+		{ ss_reason = "state:2"; return false; }			/* fail closed: sync worker stale */
 	if (st.st_size <= 0 || st.st_size > (off_t) g_session_state_max_bytes)
-		return false;			/* fail closed: empty or oversized */
+		{ ss_reason = "state:3"; return false; }			/* fail closed: empty or oversized */
 	f = fopen(g_session_state_file, "r");
 	if (!f)
-		return false;
+		{ ss_reason = "state:4"; return false; }
 	if (fseek(f, 0, SEEK_END) != 0)
 	{
 		fclose(f);
-		return false;
+		{ ss_reason = "state:5"; return false; }
 	}
 	sz = ftell(f);
 	if (sz <= 0 || sz > (long) g_session_state_max_bytes)
 	{
 		fclose(f);
-		return false;
+		{ ss_reason = "state:6"; return false; }
 	}
 	rewind(f);
 	buf = palloc((size_t) sz + 1);
@@ -648,14 +650,14 @@ session_state_allows(const char *sid, const char *role, const char *jti)
 	{
 		fclose(f);
 		pfree(buf);
-		return false;
+		{ ss_reason = "state:7"; return false; }
 	}
 	fclose(f);
 	buf[sz] = '\0';
 	if (memchr(buf, '\0', (size_t) sz) != NULL)
 	{
 		pfree(buf);
-		return false;
+		{ ss_reason = "state:8"; return false; }
 	}
 
 	jsmn_init(&p);
@@ -663,63 +665,65 @@ session_state_allows(const char *sid, const char *role, const char *jti)
 	if (ntok <= 0 || ntok > SESSION_STATE_MAX_TOKENS)
 	{
 		pfree(buf);
-		return false;			/* malformed or too many tokens */
+		{ ss_reason = "state:9"; return false; }			/* malformed or too many tokens */
 	}
 	t = palloc(sizeof(jsmntok_t) * (size_t) ntok);
 	jsmn_init(&p);
 	if (jsmn_parse(&p, buf, (size_t) sz, t, (unsigned int) ntok) != ntok
 		|| t[0].type != JSMN_OBJECT
 		|| jtok_skip(t, 0, ntok) != ntok)
-		goto done;				/* trailing values / structure error */
+		{ ss_reason = "state:10"; goto done; }				/* trailing values / structure error */
 	for (i = t[0].end; i < sz; i++)
 		if (!isspace((unsigned char) buf[i]))
-			goto done;
+			{ ss_reason = "state:11"; goto done; }
 
 	j = 1;
 	for (k = 0; k < t[0].size; k++)
 	{
 		if (j + 1 >= ntok || !jtok_plain_string(buf, &t[j]))
-			goto done;
+			{ ss_reason = "state:12"; goto done; }
 		if (jtok_eq(buf, &t[j], "generated_at"))
 		{
 			if (seen_gen || !parse_generated_at(buf, &t[j + 1], &generated))
-				goto done;
+				{ ss_reason = "state:13"; goto done; }
 			seen_gen = true;
 			j += 2;
 		}
 		else if (jtok_eq(buf, &t[j], "active_sessions"))
 		{
 			if (seen_act)
-				goto done;
+				{ ss_reason = "state:14"; goto done; }
 			seen_act = true;
 			j = jparse_active_sessions(buf, t, j + 1, ntok, sid, role, &active_hit);
 		}
 		else if (jtok_eq(buf, &t[j], "revoked_sids"))
 		{
 			if (seen_rev)
-				goto done;
+				{ ss_reason = "state:15"; goto done; }
 			seen_rev = true;
 			j = jparse_string_array(buf, t, j + 1, ntok, sid, &revoked_hit);
 		}
 		else if (jtok_eq(buf, &t[j], "denied_jtis"))
 		{
 			if (seen_den)
-				goto done;
+				{ ss_reason = "state:16"; goto done; }
 			seen_den = true;
 			j = jparse_string_array(buf, t, j + 1, ntok, jti, &jti_hit);
 		}
 		else
-			goto done;			/* unknown top-level key */
+			{ ss_reason = "state:17"; goto done; }			/* unknown top-level key */
 		if (j < 0)
-			goto done;
+			{ ss_reason = "state:18"; goto done; }
 	}
 	if (!seen_gen || !seen_act || !seen_rev || !seen_den)
-		goto done;
+		{ ss_reason = "state:19"; goto done; }
 	if (g_session_state_max_age > 0 && generated + g_session_state_max_age < now)
-		goto done;
+		{ ss_reason = "state:20"; goto done; }
 	if (generated > now + g_clock_skew)
-		goto done;				/* future-dated state is suspicious */
+		{ ss_reason = "state:21"; goto done; }				/* future-dated state is suspicious */
 	ok = active_hit && !revoked_hit && !jti_hit;
+	if (!ok)
+		ss_reason = !active_hit ? "state:not_active" : (revoked_hit ? "state:revoked" : "state:jti_denied");
 done:
 	pfree(t);
 	pfree(buf);
@@ -1123,16 +1127,25 @@ pg_appsec_validate(const ValidatorModuleState *state,
 	if (!issuer_allowed_for_tenant(iss, tenant))
 		return true;
 	if (jti_denied(jti))
+	{
+		ereport(LOG, (errmsg("pg_appsec_oauth: jti denied (replay/denylist)")));
 		return true;
+	}
 	/*
 	 * Connect-time session check via auth-service-exported state file
 	 * (no SQL from the validator). When configured, missing/revoked/unknown
 	 * sessions fail closed here; RLS still re-checks every statement.
 	 */
 	if (!session_state_allows(sid, role, jti))
+	{
+		ereport(LOG, (errmsg("pg_appsec_oauth: connect-time session check denied (%s)", ss_reason)));
 		return true;
+	}
 	if (!jti_remember(jti, exp))
-		return true;			/* cap exceeded / IO error: fail closed */
+	{
+		ereport(LOG, (errmsg("pg_appsec_oauth: jti store rejected (cap exceeded or I/O error)")));
+		return true;
+	}			/* cap exceeded / IO error: fail closed */
 	result->authorized = true;
 	result->authn_id = pstrdup(pref);
 	return true;

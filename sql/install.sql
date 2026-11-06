@@ -2531,6 +2531,8 @@ $$;
 ALTER ROLE appsec_role_admin NOLOGIN NOINHERIT CREATEROLE NOSUPERUSER NOCREATEDB NOREPLICATION NOBYPASSRLS;
 -- May grant appsec_app_base to new session roles, but cannot use its privileges.
 GRANT appsec_app_base TO appsec_role_admin WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;
+-- Needs to resolve its own helper functions in schema appsec (no table access).
+GRANT USAGE ON SCHEMA appsec TO appsec_role_admin;
 
 -- Adopt pre-existing session roles (created by superuser/provisioner in older
 -- installs) so the non-superuser helpers can manage them.
