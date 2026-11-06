@@ -97,8 +97,12 @@ jobs:
         run: |
           python3 oauth-validator/mint_tokens.py
           PUB=$(pwd)/oauth-validator/testdata/ed25519_public.pem
-          CONF=/etc/postgresql/18/main/postgresql.conf
-          HBA=/etc/postgresql/18/main/pg_hba.conf
+          # Discover paths (layout differs across Ubuntu/PGDG images)
+          sudo pg_ctlcluster 18 main start || true
+          for i in $(seq 1 30); do sudo -u postgres /usr/lib/postgresql/18/bin/pg_isready && break; sleep 1; done
+          CONF=$(sudo -u postgres /usr/lib/postgresql/18/bin/psql -Atc "SHOW config_file")
+          HBA=$(sudo -u postgres /usr/lib/postgresql/18/bin/psql -Atc "SHOW hba_file")
+          echo "CONF=$CONF HBA=$HBA"
           sudo tee -a "$CONF" >/dev/null <<GUC
           shared_preload_libraries = 'pg_appsec_oauth'
           oauth_validator_libraries = 'pg_appsec_oauth'
@@ -107,13 +111,13 @@ jobs:
           pg_appsec.oauth_required_scope = 'pg_appsec'
           pg_appsec.oauth_pubkey_file = '$PUB'
           GUC
-          # Keep peer for local superuser; add host oauth + scram
           sudo tee -a "$HBA" >/dev/null <<'HBA'
           host all all 127.0.0.1/32 oauth issuer=https://pg-appsec.test scope=pg_appsec validator=pg_appsec_oauth
           host all all 127.0.0.1/32 scram-sha-256
           HBA
           sudo pg_ctlcluster 18 main restart
-          for i in $(seq 1 30); do sudo -u postgres pg_isready && break; sleep 1; done
+          for i in $(seq 1 30); do sudo -u postgres /usr/lib/postgresql/18/bin/pg_isready && break; sleep 1; done
+          sudo -u postgres /usr/lib/postgresql/18/bin/psql -Atc "SHOW shared_preload_libraries"
       - name: OAuth token matrix
         env:
           PGHOST: 127.0.0.1
