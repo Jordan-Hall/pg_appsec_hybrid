@@ -208,13 +208,22 @@ psqlc -c "SELECT appsec.audit_event('ci.e2e', 'checkpoint', '{\"n\":2}'::jsonb)"
 cpw --verify-checkpoint-with /tmp/audit_pub.hex || { echo "FAIL checkpoint verify on clean chain"; exit 1; }
 echo "PASS checkpoint_verify_ok"
 # Signature tamper: edit event_id in the last line.
-docker exec "$NAME" bash -lc "cp '$CP' '$CP.bak' && sed -i -E 's/\"event_id\":([0-9]+)/\"event_id\":1\\1/' '$CP'"
-if cpw --verify-checkpoint-with /tmp/audit_pub.hex; then echo "FAIL tampered checkpoint accepted"; exit 1; fi
+docker exec "$NAME" bash -lc "cp -p '$CP' '$CP.bak' && sed -i -E 's/\"event_id\":([0-9]+)/\"event_id\":1\\1/' '$CP'"
+# expect_verify_fail <name> <required detail substring> <pubkey>
+expect_verify_fail() {
+  local out rc
+  set +e; out=$(cpw --verify-checkpoint-with "$3" 2>/dev/null); rc=$?; set -e
+  echo "$out"
+  [[ $rc -ne 0 ]] || { echo "FAIL $1: verify accepted"; exit 1; }
+  grep -q "$2" <<<"$out" || { echo "FAIL $1: failed for the wrong reason (want '$2')"; exit 1; }
+}
+expect_verify_fail sig_tamper "checkpoint signature invalid" /tmp/audit_pub.hex
 echo "PASS checkpoint_signature_tamper_detected"
-docker exec "$NAME" bash -lc "mv '$CP.bak' '$CP'"
+docker exec "$NAME" bash -lc "mv '$CP.bak' '$CP' && chown postgres:postgres '$CP' && chmod 600 '$CP'"
 # Wrong key.
 python3 -c "print('11'*32)" > "$WORK/other.hex"; docker cp "$WORK/other.hex" "$NAME:/tmp/other_pub.hex"; docker exec "$NAME" chmod 644 /tmp/other_pub.hex
-if cpw --verify-checkpoint-with /tmp/other_pub.hex; then echo "FAIL checkpoint accepted under wrong key"; exit 1; fi
+cpw --verify-checkpoint-with /tmp/audit_pub.hex >/dev/null || { echo "FAIL restored checkpoint no longer verifies"; exit 1; }
+expect_verify_fail wrong_key "checkpoint signature invalid" /tmp/other_pub.hex
 echo "PASS checkpoint_wrong_key_rejected"
 # Superuser rewrites the whole chain consistently: internal verify passes, anchor catches it.
 psqlc <<'SQL' >/dev/null
@@ -238,6 +247,6 @@ SQL
 INNER=$(psqlc -c "SELECT ok FROM appsec.verify_security_audit_chain()")
 echo "internal chain verify after consistent rewrite: $INNER"
 [[ $INNER == t ]] || { echo "FAIL rewrite was not self-consistent (test bug)"; exit 1; }
-if cpw --verify-checkpoint-with /tmp/audit_pub.hex; then echo "FAIL checkpoint missed superuser rewrite"; exit 1; fi
+expect_verify_fail superuser_rewrite "checkpoint hash mismatch" /tmp/audit_pub.hex
 echo "PASS checkpoint_detects_superuser_rewrite"
 echo oauth_sync_e2e_ok
