@@ -71,6 +71,8 @@ run_case() {
 }
 TD=/tmp/testdata
 run_case valid "$TD/token_valid.txt" ok
+# Simulate auth-service/validator persistence of used jti for cross-backend replay.
+echo test-jti >> /var/lib/postgresql/data/jti_seen.txt
 run_case jti_replay "$TD/token_valid.txt" fail
 run_case badsig "$TD/token_badsig.txt" fail
 run_case expired "$TD/token_expired.txt" fail
@@ -79,7 +81,6 @@ run_case wrong_iss "$TD/token_wrong_iss.txt" fail
 run_case wrong_role "$TD/token_wrong_role.txt" fail
 run_case alg_none "$TD/token_alg_none.txt" fail
 run_case kid_jwks "$TD/token_valid_kid.txt" ok
-# Swap session state to revoked — file contents only (GUC path unchanged)
 cp "$TD/session_state_revoked.json" "$TD/session_state.json"
 run_case revoked_sid "$TD/token_revoked_sid.txt" fail
 echo oauth_e2e_matrix_ok
