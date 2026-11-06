@@ -57,6 +57,14 @@ grep -q '^ssl_cert_file' \"\$CONF\" || echo \"ssl_cert_file = \$DATADIR/server.c
 grep -q '^ssl_key_file' \"\$CONF\" || echo \"ssl_key_file = \$DATADIR/server.key\" >> \"\$CONF\"
 psql -U postgres -c 'SELECT pg_reload_conf()' >/dev/null
 "
+# ssl=on requires a restart (not just reload)
+docker restart pgappsec-pg >/dev/null
+for i in \$(seq 1 60); do
+  docker exec pgappsec-pg pg_isready -U postgres -d appsec_test >/dev/null 2>&1 && break
+  sleep 1
+done
+docker exec pgappsec-pg psql -U postgres -Atc "SHOW ssl" | grep -qi on
+
 
 for f in sql/001_roles.sql sql/002_schema.sql sql/003_policies.sql \
          sql/004_identity_sessions_acl.sql sql/005_schema_security.sql \
