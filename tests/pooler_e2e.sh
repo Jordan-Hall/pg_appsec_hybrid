@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Live PgBouncer E2E: per-session SCRAM via auth_query, TLS client+server,
+# A/B isolation, revoke, DISCARD ALL leakage, pgbouncer_auth no table access.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORKDIR=$(mktemp -d)
@@ -30,52 +32,31 @@ docker rm -f pgappsec-pg pgappsec-bouncer >/dev/null 2>&1 || true
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORKDIR/server.key" -out "$WORKDIR/server.crt" \
   -days 1 -subj "/CN=pgappsec-pg" >/dev/null 2>&1
 cp "$WORKDIR/server.crt" "$WORKDIR/ca.crt"
-openssl req -x509 -newkey rsa:2048 -nodes -keyout "$WORKDIR/client.key" -out "$WORKDIR/client.crt" \
-  -days 1 -subj "/CN=client" >/dev/null 2>&1
-chmod 644 "$WORKDIR"/*.{crt,key}
-cp "$WORKDIR/server.key" "$WORKDIR/server.key.pg"
+# postgres official image runs as uid 999
+sudo chown 999:999 "$WORKDIR/server.key" "$WORKDIR/server.crt" 2>/dev/null || chown 999:999 "$WORKDIR/server.key" "$WORKDIR/server.crt" || true
+chmod 644 "$WORKDIR/server.key"
+chmod 644 "$WORKDIR/server.crt" "$WORKDIR/ca.crt"
 
 docker run -d --name pgappsec-pg --network "$NET" \
   -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=appsec_test \
-  -v "$WORKDIR:/certs:ro" \
-  "$PG_IMG"
-for i in $(seq 1 60); do
-  docker exec pgappsec-pg pg_isready -U postgres -d appsec_test >/dev/null 2>&1 && break
+  -v "$WORKDIR/server.crt:/var/lib/postgresql/server.crt:ro" \
+  -v "$WORKDIR/server.key:/var/lib/postgresql/server.key:ro" \
+  "$PG_IMG" \
+  -c ssl=on \
+  -c ssl_cert_file=/var/lib/postgresql/server.crt \
+  -c ssl_key_file=/var/lib/postgresql/server.key
+
+for i in $(seq 1 90); do
+  docker exec pgappsec-pg pg_isready -U postgres -d appsec_test >/dev/null 2>&1 && \
+    docker exec pgappsec-pg psql -U postgres -Atc 'SELECT 1' >/dev/null 2>&1 && break
   sleep 1
 done
 docker exec pgappsec-pg pg_isready -U postgres -d appsec_test
-
-docker exec pgappsec-pg bash -lc "set -e
-DATADIR=\$(psql -U postgres -Atc 'SHOW data_directory')
-cp /certs/server.crt \"\$DATADIR/server.crt\"
-cp /certs/server.key.pg \"\$DATADIR/server.key\"
-chown postgres:postgres \"\$DATADIR/server.crt\" \"\$DATADIR/server.key\" 2>/dev/null || true
-chmod 600 \"\$DATADIR/server.key\"; chmod 644 \"\$DATADIR/server.crt\"
-CONF=\$(psql -U postgres -Atc 'SHOW config_file')
-grep -q '^ssl = on' \"\$CONF\" || echo 'ssl = on' >> \"\$CONF\"
-grep -q '^ssl_cert_file' \"\$CONF\" || echo \"ssl_cert_file = \$DATADIR/server.crt\" >> \"\$CONF\"
-grep -q '^ssl_key_file' \"\$CONF\" || echo \"ssl_key_file = \$DATADIR/server.key\" >> \"\$CONF\"
-psql -U postgres -c 'SELECT pg_reload_conf()' >/dev/null
-"
-# ssl=on requires a restart (not just reload)
-docker restart pgappsec-pg >/dev/null
-ready=0
-for i in $(seq 1 90); do
-  if docker exec pgappsec-pg pg_isready -U postgres -d appsec_test >/dev/null 2>&1; then
-    if docker exec pgappsec-pg psql -U postgres -Atc "SELECT 1" >/dev/null 2>&1; then
-      ready=1; break
-    fi
-  fi
-  sleep 1
-done
-[[ $ready -eq 1 ]] || { echo 'FAIL postgres did not come back after SSL restart'; docker logs pgappsec-pg 2>&1 | tail -40; exit 1; }
 SSL=$(docker exec pgappsec-pg psql -U postgres -Atc "SHOW ssl")
 echo "ssl=$SSL"
-[[ "$SSL" == "on" ]] || { echo "FAIL expected ssl=on"; exit 1; }
-docker exec pgappsec-pg psql -U postgres -c "SHOW ssl_cert_file" -c "SHOW ssl_key_file"
-# Prove TCP+SSL accepts connections
-docker exec -e PGPASSWORD=postgres pgappsec-pg   psql "host=127.0.0.1 dbname=appsec_test user=postgres sslmode=require" -Atc "SELECT 1" >/dev/null
-
+[[ "$SSL" == "on" ]]
+docker exec -e PGPASSWORD=postgres pgappsec-pg \
+  psql "host=127.0.0.1 dbname=appsec_test user=postgres sslmode=require" -Atc "SELECT 1" >/dev/null
 
 for f in sql/001_roles.sql sql/002_schema.sql sql/003_policies.sql \
          sql/004_identity_sessions_acl.sql sql/005_schema_security.sql \
@@ -132,7 +113,7 @@ psql -U postgres -c "SELECT pg_reload_conf()" >/dev/null
 '
 
 printf '"pgbouncer_auth" "%s"\n' "$AUTH_PASS" > "$WORKDIR/userlist.txt"
-chmod 644 "$WORKDIR/userlist.txt"
+chmod 644 "$WORKDIR/userlist.txt" "$WORKDIR/server.key"
 
 cat > "$WORKDIR/pgbouncer.ini" <<INI
 [databases]
@@ -169,12 +150,6 @@ docker run -d --name pgappsec-bouncer --network "$NET" -p 16432:6432 \
   -v "$WORKDIR/server.key:/etc/pgbouncer/server.key:ro" \
   "$PB_IMG"
 
-# Client from host against published port (avoids cross-container DNS issues)
-export PGSSLMODE=require
-export PGSSLROOTCERT="$WORKDIR/ca.crt"
-# Server uses self-signed; for client->bouncer encryption we don't verify hostname strictly
-export PGSSLMODE=require
-
 psql_via() {
   local user=$1 pass=$2
   shift 2
@@ -192,6 +167,7 @@ if [[ $ready -ne 1 ]]; then
   echo 'FAIL pgbouncer never accepted connections'
   PGPASSWORD="$PASS_A" psql "host=127.0.0.1 port=16432 dbname=appsec_test user=$ROLE_A sslmode=verify-ca sslrootcert=$WORKDIR/ca.crt" -Atc 'SELECT 1' 2>&1 || true
   docker logs pgappsec-bouncer 2>&1 | tail -40 || true
+  docker logs pgappsec-pg 2>&1 | tail -20 || true
   exit 1
 fi
 
@@ -210,17 +186,6 @@ AONLY=$(psql_via "$ROLE_A" "$PASS_A" -Atc "SELECT count(*) FROM appsec.documents
 echo PASS ab_isolation
 
 echo '== pgbouncer_auth no data =='
-set +e
-OUT=$(docker exec -e PGPASSWORD="$AUTH_PASS" pgappsec-pg \
-  psql "host=127.0.0.1 port=5432 dbname=appsec_test user=pgbouncer_auth sslmode=verify-ca sslrootcert=$WORKDIR/ca.crt" \
-  -Atc "SELECT count(*) FROM appsec.documents" 2>&1)
-RC=$?
-set -e
-# From inside PG container, use local socket without ssl for this negative test if sslmode fails
-if [[ $RC -eq 0 ]]; then
-  echo "FAIL pgbouncer_auth read documents: $OUT"; exit 1
-fi
-# Also try via docker exec as that role on local socket
 set +e
 OUT=$(docker exec -e PGPASSWORD="$AUTH_PASS" pgappsec-pg \
   psql -U pgbouncer_auth -d appsec_test -Atc "SELECT count(*) FROM appsec.documents" 2>&1)
