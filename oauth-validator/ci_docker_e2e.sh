@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# CI helper: build validator inside postgres:18 container, configure OAuth, run token matrix.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OV="$ROOT/oauth-validator"
@@ -17,42 +16,48 @@ docker exec "$NAME" bash -lc 'make -C /tmp/oauth-validator PG_CONFIG=/usr/lib/po
 
 python3 "$OV/mint_tokens.py"
 docker cp "$OV/testdata" "$NAME:/tmp/testdata"
-docker exec "$NAME" bash -lc 'chmod -R a+rwX /tmp/testdata; touch /tmp/testdata/jti_denylist.txt; chmod 666 /tmp/testdata/jti_denylist.txt'
 docker cp "$OV/oauth_client.c" "$NAME:/tmp/oauth_client.c"
+docker exec "$NAME" bash -lc 'chmod -R a+rwX /tmp/testdata'
 
-docker exec "$NAME" bash -lc 'set -e
-CONF=$(psql -U postgres -Atc "SHOW config_file")
-HBA=$(psql -U postgres -Atc "SHOW hba_file")
-grep -q "pg_appsec_oauth" "$CONF" || cat >> "$CONF" <<GUC
-shared_preload_libraries = '\''pg_appsec_oauth'\''
-oauth_validator_libraries = '\''pg_appsec_oauth'\''
-pg_appsec.oauth_issuer = '\''https://pg-appsec.test'\''
-pg_appsec.oauth_audience = '\''pg_appsec'\''
-pg_appsec.oauth_required_scope = '\''pg_appsec'\''
-pg_appsec.oauth_pubkey_file = '\''/tmp/testdata/ed25519_public.pem'\''
-pg_appsec.oauth_jwks_file = '\''/tmp/testdata/jwks_kid.json'\''
-pg_appsec.oauth_session_state_file = '\''/tmp/testdata/session_state.json'\''
-pg_appsec.oauth_jti_denylist_file = '\''/tmp/jti_seen.txt'\''
+DATADIR=$(docker exec "$NAME" psql -U postgres -Atc "SHOW data_directory")
+echo "DATADIR=$DATADIR"
+docker exec "$NAME" bash -lc "touch '$DATADIR/jti_seen.txt' && chmod 666 '$DATADIR/jti_seen.txt'"
+
+docker exec "$NAME" bash -lc "set -e
+CONF=\$(psql -U postgres -Atc 'SHOW config_file')
+HBA=\$(psql -U postgres -Atc 'SHOW hba_file')
+grep -q pg_appsec_oauth \"\$CONF\" || cat >> \"\$CONF\" <<GUC
+shared_preload_libraries = 'pg_appsec_oauth'
+oauth_validator_libraries = 'pg_appsec_oauth'
+pg_appsec.oauth_issuer = 'https://pg-appsec.test'
+pg_appsec.oauth_audience = 'pg_appsec'
+pg_appsec.oauth_required_scope = 'pg_appsec'
+pg_appsec.oauth_pubkey_file = '/tmp/testdata/ed25519_public.pem'
+pg_appsec.oauth_jwks_file = '/tmp/testdata/jwks_kid.json'
+pg_appsec.oauth_session_state_file = '/tmp/testdata/session_state.json'
+pg_appsec.oauth_jti_denylist_file = '${DATADIR}/jti_seen.txt'
 GUC
-TMP=$(mktemp)
+TMP=\$(mktemp)
 {
-  echo "# pg_appsec oauth e2e"
-  echo "host all all 127.0.0.1/32 oauth issuer=https://pg-appsec.test scope=pg_appsec validator=pg_appsec_oauth"
-  echo "host all all ::1/128 oauth issuer=https://pg-appsec.test scope=pg_appsec validator=pg_appsec_oauth"
-  grep -E "^(local|host)" "$HBA" | grep -v "127.0.0.1/32 oauth" | grep -v "::1/128 oauth" || true
-} > "$TMP"
-cp "$TMP" "$HBA"
-'
-docker exec "$NAME" bash -lc 'touch /tmp/jti_seen.txt; chown postgres:postgres /tmp/jti_seen.txt; chmod 666 /tmp/jti_seen.txt' || true
+  echo '# pg_appsec oauth e2e'
+  echo 'host all all 127.0.0.1/32 oauth issuer=https://pg-appsec.test scope=pg_appsec validator=pg_appsec_oauth'
+  echo 'host all all ::1/128 oauth issuer=https://pg-appsec.test scope=pg_appsec validator=pg_appsec_oauth'
+  grep -E '^(local|host)' \"\$HBA\" | grep -v '127.0.0.1/32 oauth' | grep -v '::1/128 oauth' || true
+} > \"\$TMP\"
+cp \"\$TMP\" \"\$HBA\"
+"
 docker restart "$NAME"
 for i in $(seq 1 60); do docker exec "$NAME" pg_isready -U postgres && break; sleep 1; done
+# /tmp may be wiped; restore testdata and jti file
+docker cp "$OV/testdata" "$NAME:/tmp/testdata"
+docker exec "$NAME" bash -lc "chmod -R a+rwX /tmp/testdata; touch '$DATADIR/jti_seen.txt'; chmod 666 '$DATADIR/jti_seen.txt'"
 PRELOAD=$(docker exec "$NAME" psql -U postgres -Atc "SHOW shared_preload_libraries")
 echo "preload=$PRELOAD"
 echo "$PRELOAD" | grep -q pg_appsec_oauth
 
 docker exec "$NAME" psql -U postgres -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN CREATE ROLE $ROLE LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;"
 
-docker exec -e ROLE="$ROLE" "$NAME" bash -lc 'set -e
+docker exec -e ROLE="$ROLE" -e DATADIR="$DATADIR" "$NAME" bash -lc 'set -e
 cc -o /tmp/oauth_client /tmp/oauth_client.c -I$(pg_config --includedir) -L$(pg_config --libdir) -lpq
 run_case() {
   local name=$1 token=$2 expect=$3
@@ -71,8 +76,7 @@ run_case() {
 }
 TD=/tmp/testdata
 run_case valid "$TD/token_valid.txt" ok
-# Simulate auth-service/validator persistence of used jti for cross-backend replay.
-echo test-jti >> /tmp/jti_seen.txt
+echo test-jti >> "$DATADIR/jti_seen.txt"
 run_case jti_replay "$TD/token_valid.txt" fail
 run_case badsig "$TD/token_badsig.txt" fail
 run_case expired "$TD/token_expired.txt" fail
