@@ -32,8 +32,7 @@ AS $$
      AND requested_role = ANY(a.assigned_roles)
      AND ((a.principal_kind='user' AND a.principal_id=appsec.uid()::text)
        OR (a.principal_kind='group' AND EXISTS (
-         SELECT 1 FROM appsec.group_members gm WHERE gm.user_id=appsec.uid() AND gm.group_id::text=a.principal_id))
-       OR (a.principal_kind='public' AND a.principal_id='*'))
+         SELECT 1 FROM appsec.group_members gm WHERE gm.user_id=appsec.uid() AND gm.group_id::text=a.principal_id)))
  )
 $$;
 
@@ -269,11 +268,13 @@ BEGIN
   IF NOT appsec.jsonb_all_leaf_paths_writable('documents.body', input_body) THEN
     RAISE EXCEPTION 'document contains an unconfigured or unauthorized JSON field' USING ERRCODE = '42501';
   END IF;
-  INSERT INTO appsec.documents(tenant_id, owner_id, body)
-  VALUES (tenant, actor, input_body)
-  RETURNING document_id INTO new_id;
-  INSERT INTO appsec.document_acl(document_id, tenant_id, readers, authors, is_public)
-  VALUES (new_id, tenant, ARRAY[actor], ARRAY[actor], input_body ->> '$PublicAccess' = '1');
+  -- Allocate id first and avoid INSERT…RETURNING: under FORCE RLS the SELECT
+  -- policy (can_read_document) would fail before document_acl exists.
+  new_id := gen_random_uuid();
+  INSERT INTO appsec.documents(document_id, tenant_id, owner_id, body)
+  VALUES (new_id, tenant, actor, input_body);
+  INSERT INTO appsec.document_acl(document_id, tenant_id, readers, authors, readers_restricted, is_public)
+  VALUES (new_id, tenant, ARRAY[actor], ARRAY[actor], true, coalesce(input_body ->> '$PublicAccess' = '1', false));
   RETURN new_id;
 END
 $$;
@@ -314,7 +315,9 @@ SET search_path = pg_catalog, appsec
 AS $$
   SELECT d.document_id, d.tenant_id, d.owner_id,
          appsec.jsonb_project('documents.body', d.body), d.created_at, d.updated_at
-  FROM appsec.documents d WHERE d.document_id = doc_id
+  FROM appsec.documents d
+  WHERE d.document_id = doc_id
+    AND appsec.can_read_document(d.document_id)
 $$;
 
 REVOKE ALL ON FUNCTION appsec.create_document(jsonb), appsec.set_jsonb_path(uuid,text[],jsonb), appsec.get_document(uuid) FROM PUBLIC;

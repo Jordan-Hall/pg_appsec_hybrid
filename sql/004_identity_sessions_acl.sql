@@ -361,6 +361,12 @@ DECLARE gid uuid;
 BEGIN
   IF length(trim(group_name)) NOT BETWEEN 1 AND 128 THEN RAISE EXCEPTION 'invalid group name' USING ERRCODE='22023'; END IF;
   IF appsec.uid() IS NULL OR appsec.tenant_id() IS NULL THEN RAISE EXCEPTION 'active tenant principal required' USING ERRCODE='42501'; END IF;
+  IF NOT pg_has_role(session_user,'appsec_operator_base','member')
+     AND appsec.effective_database_access('*') < 6
+     AND appsec.effective_database_access('documents') < 6
+     AND NOT appsec.has_nonpublic_role('groups.create') THEN
+    RAISE EXCEPTION 'group administration privilege required' USING ERRCODE='42501';
+  END IF;
   INSERT INTO appsec.groups(tenant_id,name,created_by) VALUES(appsec.tenant_id(),group_name,appsec.uid()) RETURNING group_id INTO gid;
   RETURN gid;
 END $$;
@@ -405,8 +411,7 @@ AS $$
      AND requested_role = ANY(a.assigned_roles)
      AND ((a.principal_kind='user' AND a.principal_id=appsec.uid()::text)
        OR (a.principal_kind='group' AND EXISTS (
-         SELECT 1 FROM appsec.group_members gm WHERE gm.user_id=appsec.uid() AND gm.group_id::text=a.principal_id))
-       OR (a.principal_kind='public' AND a.principal_id='*'))
+         SELECT 1 FROM appsec.group_members gm WHERE gm.user_id=appsec.uid() AND gm.group_id::text=a.principal_id)))
  )
 $$;
 
