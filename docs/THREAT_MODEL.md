@@ -58,3 +58,11 @@ TLS with certificate verification; secrets in a secret manager; short-lived acce
 - JSONB creation validates every configured protected path before inserting a document. Reads are deny-by-default projections; writes require an exact configured path grant and cannot replace a parent containing separately secured descendants.
 - The JSONB path ACL applies to the `documents.body` API. It does not magically secure arbitrary JSONB columns in arbitrary application tables. Use the same protected API pattern or generated views/functions for each resource.
 - The document owner is always retained in Readers and Authors, even when an ACL is replaced.
+
+
+## Custom RLS helpers and DSL
+
+- `appsec.uid()`, `tenant_id()`, `session_id()`, `has_role(text)`, `auth()` derive identity solely from `session_user` and catalog tables. Caller `set_config` GUCs are ignored.
+- `define_table_permissions` / `define_field_permissions` are admin/owner-only, validate expressions, quote identifiers, FORCE RLS, and use RESTRICTIVE policies for optional tenant columns.
+- Field select masking uses security-barrier views (`*_secured`); field updates are guarded by triggers. Treat expression validation as defense-in-depth, not a full SQL sandbox.
+- Domino ACL remains optional and composable: RESTRICTIVE tenant policies AND with permissive DSL/hand policies; permissive policies OR with each other.

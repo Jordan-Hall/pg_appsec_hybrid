@@ -27,3 +27,8 @@ For direct connections, the client uses the same session role as the requested P
 Logout, password change, account disable, refresh-token reuse and expiry revoke the session, revoke the pool credential and set the session role `NOLOGIN`. Existing backend connections remain physically open until released, but every protected statement fails the session lookup and RLS denies access. Run `AuthService::reap_expired_sessions()` periodically to mark expired roles `NOLOGIN`; a later maintenance job may drop roles only after confirming no backend still uses them and removing their memberships/dependencies.
 
 Per-session roles increase PostgreSQL role and PgBouncer pool cardinality. Load-test realistic concurrent session counts, pool churn, idle eviction and `max_db_connections`. Keep pool sizes small (usually one backend per active session) and enforce global connection limits. This architecture trades role churn for strong per-session isolation.
+
+
+## PgBouncer reset
+
+`config/pgbouncer-transaction.ini` sets `server_reset_query = DISCARD ALL` and `server_reset_query_always = 1` so session state cannot leak across clients sharing a backend. Never configure a forced database `user=` for application traffic; CI runs `tools/check_pgbouncer_no_forced_user.sh`.

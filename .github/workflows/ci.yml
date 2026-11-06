@@ -58,12 +58,92 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Ban forced PgBouncer user=
+        run: bash tools/check_pgbouncer_no_forced_user.sh
+      - name: Regenerate and verify install.sql
+        run: |
+          python3 tools/build_install_sql.py
+          git diff --exit-code sql/install.sql
       - name: Apply SQL migrations
         run: |
-          psql -v ON_ERROR_STOP=1 -f sql/001_roles.sql
-          psql -v ON_ERROR_STOP=1 -f sql/002_schema.sql
-          psql -v ON_ERROR_STOP=1 -f sql/003_policies.sql
-          psql -v ON_ERROR_STOP=1 -f sql/004_identity_sessions_acl.sql
-          psql -v ON_ERROR_STOP=1 -f sql/005_schema_security.sql
+          for f in sql/001_roles.sql sql/002_schema.sql sql/003_policies.sql \
+                   sql/004_identity_sessions_acl.sql sql/005_schema_security.sql \
+                   sql/006_custom_rls.sql; do
+            psql -v ON_ERROR_STOP=1 -f "$f"
+          done
       - name: Run adversarial SQL tests
         run: psql -v ON_ERROR_STOP=1 -f tests/pg_appsec_adversarial.sql
+      - name: Run security regression (custom RLS + ACL)
+        run: psql -v ON_ERROR_STOP=1 -f tests/security_regression.sql
+
+  oauth-validator:
+    name: OAuth validator E2E (PG18)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL 18 + build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates gnupg lsb-release libssl-dev python3-cryptography build-essential
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
+          echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-18 postgresql-server-dev-18 libpq-dev
+      - name: Build and install validator module
+        run: |
+          make -C oauth-validator PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
+          sudo install -m 755 oauth-validator/pg_appsec_oauth.so "$(/usr/lib/postgresql/18/bin/pg_config --pkglibdir)/"
+      - name: Mint tokens and configure GUCs + HBA
+        run: |
+          python3 oauth-validator/mint_tokens.py
+          PUB=$(pwd)/oauth-validator/testdata/ed25519_public.pem
+          CONF=/etc/postgresql/18/main/postgresql.conf
+          HBA=/etc/postgresql/18/main/pg_hba.conf
+          sudo tee -a "$CONF" >/dev/null <<GUC
+          shared_preload_libraries = 'pg_appsec_oauth'
+          oauth_validator_libraries = 'pg_appsec_oauth'
+          pg_appsec.oauth_issuer = 'https://pg-appsec.test'
+          pg_appsec.oauth_audience = 'pg_appsec'
+          pg_appsec.oauth_required_scope = 'pg_appsec'
+          pg_appsec.oauth_pubkey_file = '$PUB'
+          GUC
+          # Keep peer for local superuser; add host oauth + scram
+          sudo tee -a "$HBA" >/dev/null <<'HBA'
+          host all all 127.0.0.1/32 oauth issuer=https://pg-appsec.test scope=pg_appsec validator=pg_appsec_oauth
+          host all all 127.0.0.1/32 scram-sha-256
+          HBA
+          sudo pg_ctlcluster 18 main restart
+          for i in $(seq 1 30); do sudo -u postgres pg_isready && break; sleep 1; done
+      - name: OAuth token matrix
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: 5432
+          PG_CONFIG: /usr/lib/postgresql/18/bin/pg_config
+        run: |
+          ROLE=app_s_a1111111a111a111a111a11111111111
+          sudo -u postgres psql -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN CREATE ROLE $ROLE LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;"
+          cc -o oauth-validator/oauth_client oauth-validator/oauth_client.c -I"$($PG_CONFIG --includedir)" -L"$($PG_CONFIG --libdir)" -lpq
+          export LD_LIBRARY_PATH="$($PG_CONFIG --libdir):${LD_LIBRARY_PATH:-}"
+          run_case() {
+            local name=$1 token=$2 expect=$3
+            set +e
+            out=$(./oauth-validator/oauth_client 127.0.0.1 5432 postgres "$ROLE" "$token" 2>&1)
+            rc=$?
+            set -e
+            if [[ $expect == ok ]]; then
+              [[ $rc -eq 0 ]] || { echo "FAIL $name: $out"; exit 1; }
+              echo "PASS $name"
+            else
+              [[ $rc -ne 0 ]] || { echo "FAIL $name expected deny: $out"; exit 1; }
+              echo "PASS $name (denied)"
+            fi
+          }
+          OV=oauth-validator/testdata
+          run_case valid "$OV/token_valid.txt" ok
+          run_case badsig "$OV/token_badsig.txt" fail
+          run_case expired "$OV/token_expired.txt" fail
+          run_case wrong_aud "$OV/token_wrong_aud.txt" fail
+          run_case wrong_iss "$OV/token_wrong_iss.txt" fail
+          run_case wrong_role "$OV/token_wrong_role.txt" fail
+          run_case alg_none "$OV/token_alg_none.txt" fail
+          echo oauth_e2e_matrix_ok

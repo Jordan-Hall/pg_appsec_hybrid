@@ -35,9 +35,10 @@ PostgreSQL OAuth is used for direct connections; PgBouncer's standard authentica
 - `sql/003_policies.sql`: document table, native RLS, JSONB field policy helpers and example grants. `create_document` grants initial access only to its creator; sharing requires a separately authorized ACL operation.
 - `sql/004_identity_sessions_acl.sql`: application auth/session tables, per-session principals, SCRAM lookup, Domino ACLs, tenant management and session APIs.
 - `sql/005_schema_security.sql`: generic tenant/owner RLS and column-grant helpers for application-owned tables.
+- `sql/006_custom_rls.sql`: Surreal-style `uid`/`auth` helpers, `define_table_permissions` / `define_field_permissions` DSL.
 - `config/pg_hba.oauth.example`: PostgreSQL 18 OAuth HBA example (requires an installed validator).
 - `config/pgbouncer-session.ini` and `config/pgbouncer-transaction.ini`: per-session SCRAM pool templates; configure the dedicated `pgbouncer_auth` login.
-- `docs/THREAT_MODEL.md`: trust boundaries and mandatory controls.
+- `docs/THREAT_MODEL.md`, `docs/RLS.md`: trust boundaries and mandatory controls.
 - `docs/ROADMAP.md`: implementation milestones and parity matrix.
 - `oauth-validator/`: PostgreSQL 18 OAuth validator implementation contract and C module skeleton.
 - `crates/appsec-auth/`: Rust authentication/session service library; it is not an HTTP server.
@@ -47,7 +48,7 @@ PostgreSQL OAuth is used for direct connections; PgBouncer's standard authentica
 
 1. Build the extension with `cargo pgrx init --pg18 /path/to/pg_config` and `cargo pgrx package --pg-config /path/to/pg_config`.
 2. Install the package in the PostgreSQL 18 installation and run `CREATE EXTENSION pg_appsec;` as a database administrator. The extension install script applies the ordered SQL migrations. For development, the individual migrations remain available under `sql/001_roles.sql` through `sql/005_schema_security.sql`.
-3. Create a private `pg_appsec_auth` login using `examples/auth-service-role.sql`; it must be `NOINHERIT` and a member of `appsec_provisioner`. The trusted Rust auth service provisions one login role per authenticated session using `SET LOCAL ROLE appsec_provisioner`. Never let untrusted application sessions create or grant roles. The service returns a random database password for PgBouncer access; it is not the user's password. Create a separate `pgbouncer_auth` login using `examples/pgbouncer-auth.sql`; it inherits only `appsec_pool_auth`, which exposes the SCRAM lookup function. Configure its own SCRAM secret in PgBouncer's protected `userlist.txt`.
+3. Create a private `appsec_auth_svc` login using `examples/auth-service-role.sql`; it must be `NOINHERIT` and a member of `appsec_provisioner`. The trusted Rust auth service provisions one login role per authenticated session using `SET LOCAL ROLE appsec_provisioner`. Never let untrusted application sessions create or grant roles. The service returns a random database password for PgBouncer access; it is not the user's password. Create a separate `pgbouncer_auth` login using `examples/pgbouncer-auth.sql`; it inherits only `appsec_pool_auth`, which exposes the SCRAM lookup function. Configure its own SCRAM secret in PgBouncer's protected `userlist.txt`.
 4. Build/install the PostgreSQL 18 OAuth validator following `oauth-validator/README.md`; configure `oauth_validator_libraries` and HBA as described.
 5. Configure issuer, audience, allowed algorithms, token type, claim mapping, key rotation, revocation and role mapping in the validator. The skeleton intentionally fails closed and is not a working validator.
 6. Run the adversarial tests and pooler matrix against the exact PostgreSQL, libpq, PgBouncer and driver versions in use.
