@@ -59,11 +59,16 @@ psql -U postgres -c 'SELECT pg_reload_conf()' >/dev/null
 "
 # ssl=on requires a restart (not just reload)
 docker restart pgappsec-pg >/dev/null
-for i in \$(seq 1 60); do
+for i in $(seq 1 60); do
   docker exec pgappsec-pg pg_isready -U postgres -d appsec_test >/dev/null 2>&1 && break
   sleep 1
 done
-docker exec pgappsec-pg psql -U postgres -Atc "SHOW ssl" | grep -qi on
+SSL=$(docker exec pgappsec-pg psql -U postgres -Atc "SHOW ssl")
+echo "ssl=$SSL"
+[[ "$SSL" == "on" ]]
+docker exec pgappsec-pg psql -U postgres -Atc "SHOW ssl_cert_file; SHOW ssl_key_file"
+# Prove server accepts SSL from the pooler network identity
+docker exec pgappsec-pg bash -lc 'PGPASSWORD=postgres psql "host=127.0.0.1 dbname=appsec_test user=postgres sslmode=require" -Atc "SELECT 1"' >/dev/null
 
 
 for f in sql/001_roles.sql sql/002_schema.sql sql/003_policies.sql \
