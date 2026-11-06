@@ -40,6 +40,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 GRANT appsec_provisioner TO ci_provisioner_login;
 DROP ROLE IF EXISTS app_s_dddddddddddddddddddddddddddddddd;
 SET SESSION AUTHORIZATION ci_provisioner_login;
+SET ROLE appsec_provisioner;  -- as the auth service does (SET LOCAL ROLE)
 SELECT appsec.create_session_role('app_s_dddddddddddddddddddddddddddddddd', 'ci-session-password-xyz', now() + interval '1 hour', 2);
 SELECT appsec.harden_session_role('app_s_dddddddddddddddddddddddddddddddd', now() + interval '2 hours', 3);
 SELECT appsec.set_session_role_password('app_s_dddddddddddddddddddddddddddddddd', 'ci-session-password-rotated');

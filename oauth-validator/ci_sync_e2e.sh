@@ -32,12 +32,14 @@ docker cp "$OV/testdata/." "$NAME:$TD/"
 docker exec "$NAME" bash -lc "chmod -R a+rX $TD"
 
 NEXT=1
-next_token() { echo "$TD/token_p${NEXT}.txt"; NEXT=$((NEXT + 1)); }
+# Sets $TOK (no subshell, so the counter advances).
+next_token() { TOK="$TD/token_p${NEXT}.txt"; NEXT=$((NEXT + 1)); }
 try_login() { docker exec "$NAME" /tmp/oauth_client 127.0.0.1 5432 postgres "$ROLE" "$1" >/dev/null 2>&1; }
 expect() {
-  local name=$1 want=$2 tok
-  tok=$(next_token)
-  if try_login "$tok"; then got=ok; else got=fail; fi
+  local name=$1 want=$2
+  next_token
+  if try_login "$TOK"; then got=ok; else got=fail; fi
+  echo "  ($name used $(basename "$TOK"))"
   [[ $got == "$want" ]] || { echo "FAIL $name expected $want got $got"; docker logs --tail 30 "$NAME" || true; exit 1; }
   echo "PASS $name ($got)"
 }
@@ -160,7 +162,8 @@ expect sync_active_session ok
 psqlc -c "UPDATE appsec.sessions SET revoked_at = clock_timestamp() WHERE session_id = '$SID'"
 T0=$(date +%s.%N); DENIED=""
 for i in $(seq 1 25); do
-  if ! try_login "$(next_token)"; then DENIED=$(python3 -c "import time;print(round(time.time()-$T0,2))"); break; fi
+  next_token
+  if ! try_login "$TOK"; then DENIED=$(python3 -c "import time;print(round(time.time()-$T0,2))"); break; fi
   sleep 0.2
 done
 [[ -n $DENIED ]] || { echo "FAIL revoked session still accepted after 5s"; exit 1; }
@@ -170,7 +173,7 @@ expect sync_revoke_stays_denied fail
 
 psqlc -c "UPDATE appsec.sessions SET revoked_at = NULL WHERE session_id = '$SID'"
 OK=""
-for i in $(seq 1 25); do if try_login "$(next_token)"; then OK=1; break; fi; sleep 0.2; done
+for i in $(seq 1 25); do next_token; if try_login "$TOK"; then OK=1; break; fi; sleep 0.2; done
 [[ -n $OK ]] || { echo "FAIL un-revoked session not restored"; exit 1; }
 echo "PASS sync_unrevoke_restored"
 
