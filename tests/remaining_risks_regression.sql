@@ -81,17 +81,31 @@ RESET SESSION AUTHORIZATION;
 
 -- Audit verify + head export
 SELECT appsec.audit_event('anchor_test', 'chain', '{"n":1}'::jsonb);
-SELECT ok AS audit_verify_ok FROM appsec.verify_security_audit_chain();
-SELECT (appsec.export_audit_chain_head()->>'event_hash') IS NOT NULL AS head_ok;
+SELECT ok AS audit_verify_ok FROM appsec.verify_security_audit_chain() \gset
+\if :audit_verify_ok
+\else
+  \echo 'FAIL audit chain invalid before tamper'
+  SELECT 1/0;
+\endif
+SELECT (appsec.export_audit_chain_head()->>'event_hash') IS NOT NULL AS head_ok \gset
+\if :head_ok
+\else
+  SELECT 1/0;
+\endif
 
--- Tamper detection: disable immutable trigger as superuser, corrupt, re-enable, verify fails
+-- Tamper detection (rolled back so later suites see an intact chain).
+BEGIN;
 ALTER TABLE appsec.security_audit_chain DISABLE TRIGGER security_audit_chain_no_upd;
 UPDATE appsec.security_audit_chain SET event_type = 'tampered' WHERE event_id = (
   SELECT max(event_id) FROM appsec.security_audit_chain
 );
-ALTER TABLE appsec.security_audit_chain ENABLE TRIGGER security_audit_chain_no_upd;
-SELECT NOT ok AS audit_tamper_detected FROM appsec.verify_security_audit_chain();
--- Note: chain remains broken for subsequent tests in this DB; CI job is ephemeral.
+SELECT NOT ok AS audit_tamper_detected FROM appsec.verify_security_audit_chain() \gset
+ROLLBACK;
+\if :audit_tamper_detected
+\else
+  \echo 'FAIL audit tamper not detected'
+  SELECT 1/0;
+\endif
 
 -- NOTIFY channel exists (trigger fires without error)
 UPDATE appsec.sessions SET last_seen_at = clock_timestamp()
