@@ -7,6 +7,7 @@ files = [
     "003_policies.sql",
     "004_identity_sessions_acl.sql",
     "005_schema_security.sql",
+    "006_custom_rls.sql",
 ]
 parts = []
 for name in files:
