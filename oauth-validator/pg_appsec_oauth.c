@@ -449,7 +449,7 @@ session_state_allows(const char *sid, const char *role)
 		}
 	}
 
-	snprintf(role_needle, sizeof(role_needle), "\"role\":\"%s\"", role);
+	snprintf(role_needle, sizeof(role_needle), "\"%s\"", role);
 	if (strstr(buf, sid) && strstr(buf, role_needle))
 		ok = true;
 	pfree(buf);

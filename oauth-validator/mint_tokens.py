@@ -57,16 +57,12 @@ state = {
     "revoked_sids": [],
     "denied_jtis": [],
 }
-(td / "session_state.json").write_text(json.dumps(state))
-(td / "session_state_revoked.json").write_text(json.dumps({
-    "active_sessions": [],
-    "revoked_sids": [sid],
-    "denied_jtis": ["denied-jti"],
-}))
+(td / "session_state.json").write_text(json.dumps(state, separators=(",", ":")))
+(td / "session_state_revoked.json").write_text(json.dumps({"active_sessions": [], "revoked_sids": [sid], "denied_jtis": ["denied-jti"]}, separators=(",", ":")))
 (td / "jti_denylist.txt").write_text("denied-jti\n")
 # JWKS with kid for rotation
 pub_pem = pub_path.read_text()
-(td / "jwks_kid.json").write_text(json.dumps({"keys": [{"kid": "k1", "pem": pub_pem}]}))
+(td / "jwks_kid.json").write_text(json.dumps({"keys": [{"kid": "k1", "pem": pub_pem}]}, separators=(",", ":")))
 # token with kid header
 def mint_kid(**claims):
     hdr = {"alg": "EdDSA", "typ": "JWT", "kid": "k1"}
