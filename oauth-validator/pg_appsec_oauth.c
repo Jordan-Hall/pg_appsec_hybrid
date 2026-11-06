@@ -611,7 +611,7 @@ _PG_init(void)
 							0, NULL, NULL, NULL);
 }
 
-PGDLLEXPORT const OAuthValidatorCallbacks *
+__attribute__((visibility("default"))) PGDLLEXPORT const OAuthValidatorCallbacks *
 _PG_oauth_validator_module_init(void)
 {
 	return &pg_appsec_callbacks;

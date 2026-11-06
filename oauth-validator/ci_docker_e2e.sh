@@ -13,7 +13,7 @@ for i in $(seq 1 60); do docker exec "$NAME" pg_isready -U postgres && break; sl
 
 docker exec "$NAME" bash -lc 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libssl-dev postgresql-server-dev-18 libpq-dev'
 docker cp "$OV" "$NAME:/tmp/oauth-validator"
-docker exec "$NAME" bash -lc 'make -C /tmp/oauth-validator PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config && install -m 755 /tmp/oauth-validator/pg_appsec_oauth.so "$(pg_config --pkglibdir)/"'
+docker exec "$NAME" bash -lc 'make -C /tmp/oauth-validator PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config && nm -D /tmp/oauth-validator/pg_appsec_oauth.so | grep _PG_oauth_validator_module_init && install -m 755 /tmp/oauth-validator/pg_appsec_oauth.so "$(pg_config --pkglibdir)/"'
 
 python3 "$OV/mint_tokens.py"
 docker cp "$OV/testdata" "$NAME:/tmp/testdata"
