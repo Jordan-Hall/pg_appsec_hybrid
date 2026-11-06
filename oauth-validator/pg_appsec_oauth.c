@@ -1,3 +1,7 @@
+/* Enable strptime/timegm on glibc */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 /*
  * pg_appsec_oauth — PostgreSQL 18 OAuth validator for pg_appsec_hybrid.
  *
@@ -30,6 +34,7 @@
 #include <openssl/rsa.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
 
 PG_MODULE_MAGIC;
 
@@ -46,6 +51,7 @@ static int	g_max_token_bytes = 8192;
 static char *g_session_state_file = NULL;
 static char *g_jti_denylist_file = NULL;
 static char *g_issuer_map_file = NULL;
+static int	g_session_state_max_age = 120;
 
 #define MAX_CLAIM 512
 #define JTI_SEEN_CAP 4096
@@ -398,10 +404,22 @@ session_state_allows(const char *sid, const char *role)
 	bool		ok = false;
 	char		role_needle[128];
 	char		sid_needle[128];
+	struct stat st;
+	time_t		now;
+	const char *gat;
+	char		tsbuf[64];
+	struct tm	tm;
+	time_t		generated;
 
 	/* If no state file configured, allow (RLS still enforces post-connect). */
 	if (!g_session_state_file || g_session_state_file[0] == '\0')
 		return true;
+	if (stat(g_session_state_file, &st) != 0)
+		return false;			/* fail closed when configured but missing */
+	now = time(NULL);
+	if (g_session_state_max_age > 0
+		&& st.st_mtime + g_session_state_max_age < now)
+		return false;			/* fail closed: sync worker stale */
 	f = fopen(g_session_state_file, "r");
 	if (!f)
 		return false;			/* fail closed when configured but missing */
@@ -426,6 +444,39 @@ session_state_allows(const char *sid, const char *role)
 	}
 	fclose(f);
 	buf[sz] = '\0';
+
+	/* Prefer JSON generated_at when present (more reliable than mtime across mounts). */
+	gat = strstr(buf, "\"generated_at\"");
+	if (gat && g_session_state_max_age > 0)
+	{
+		const char *q1 = strchr(gat + 14, '"');
+		const char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
+
+		if (q1 && q2 && (q2 - q1 - 1) < (long) sizeof(tsbuf))
+		{
+			memset(tsbuf, 0, sizeof(tsbuf));
+			memcpy(tsbuf, q1 + 1, (size_t) (q2 - q1 - 1));
+			/* Accept RFC3339 UTC (...Z) by zeroing fractional/zone for timegm-ish parse of YYYY-MM-DDTHH:MM:SS */
+			if (strlen(tsbuf) >= 19)
+			{
+				tsbuf[19] = '\0';
+				memset(&tm, 0, sizeof(tm));
+				if (strptime(tsbuf, "%Y-%m-%dT%H:%M:%S", &tm) != NULL)
+				{
+#if defined(__linux__)
+					generated = timegm(&tm);
+#else
+					generated = timegm(&tm);
+#endif
+					if (generated > 0 && generated + g_session_state_max_age < now)
+					{
+						pfree(buf);
+						return false;
+					}
+				}
+			}
+		}
+	}
 
 	/* Revoked list wins. */
 	snprintf(sid_needle, sizeof(sid_needle), "%s", sid);
@@ -839,6 +890,14 @@ _PG_init(void)
 							   "",
 							   PGC_SIGHUP,
 							   0, NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_appsec.oauth_session_state_max_age_secs",
+							"Reject login if session-state file older than this many seconds (0 disables)",
+							NULL,
+							&g_session_state_max_age,
+							120,
+							0, 86400,
+							PGC_SIGHUP,
+							0, NULL, NULL, NULL);
 }
 
 __attribute__((visibility("default"))) PGDLLEXPORT const OAuthValidatorCallbacks *

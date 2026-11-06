@@ -23,5 +23,5 @@ zeroize = { version = "1.8", features = ["derive"] }
 [dev-dependencies]
 
 [workspace]
-members = ["crates/appsec-auth"]
+members = ["crates/appsec-auth", "crates/oauth-state-sync"]
 resolver = "2"

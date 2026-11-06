@@ -36,6 +36,7 @@ pg_appsec.oauth_pubkey_file = '/tmp/testdata/ed25519_public.pem'
 pg_appsec.oauth_jwks_file = '/tmp/testdata/jwks_kid.json'
 pg_appsec.oauth_session_state_file = '/tmp/testdata/session_state.json'
 pg_appsec.oauth_jti_denylist_file = '${DATADIR}/jti_seen.txt'
+pg_appsec.oauth_session_state_max_age_secs = 120
 GUC
 TMP=\$(mktemp)
 {
@@ -76,6 +77,7 @@ run_case() {
 }
 TD=/tmp/testdata
 run_case valid "$TD/token_valid.txt" ok
+cp "$TD/session_state.json" "$TD/session_state.json.bak"
 echo test-jti >> "$DATADIR/jti_seen.txt"
 run_case jti_replay "$TD/token_valid.txt" fail
 run_case badsig "$TD/token_badsig.txt" fail
@@ -87,5 +89,38 @@ run_case alg_none "$TD/token_alg_none.txt" fail
 run_case kid_jwks "$TD/token_valid_kid.txt" ok
 cp "$TD/session_state_revoked.json" "$TD/session_state.json"
 run_case revoked_sid "$TD/token_revoked_sid.txt" fail
+echo oauth_e2e_cases_done
+'
+
+# Host-side stale session-state + unique jti token
+python3 - "$OV/testdata" <<'PYHOST'
+import json, sys
+from pathlib import Path
+td = Path(sys.argv[1])
+obj = json.loads((td / "session_state.json").read_text())
+obj["generated_at"] = "2000-01-01T00:00:00Z"
+(td / "session_state_stale.json").write_text(json.dumps(obj, separators=(",", ":")))
+print("wrote stale session_state")
+PYHOST
+docker cp "$OV/testdata/session_state_stale.json" "$NAME:/tmp/testdata/session_state.json"
+docker cp "$OV/testdata/token_stale_probe.txt" "$NAME:/tmp/testdata/token_stale_probe.txt"
+
+docker exec -e ROLE="$ROLE" "$NAME" bash -lc 'set -e
+run_case() {
+  local name=$1 token=$2 expect=$3
+  set +e
+  out=$(/tmp/oauth_client 127.0.0.1 5432 postgres "$ROLE" "$token" 2>&1)
+  rc=$?
+  set -e
+  echo "$out"
+  if [[ $expect == ok ]]; then
+    [[ $rc -eq 0 ]] || { echo "FAIL $name expected ok"; exit 1; }
+    echo "PASS $name"
+  else
+    [[ $rc -ne 0 ]] || { echo "FAIL $name expected deny"; exit 1; }
+    echo "PASS $name (denied)"
+  fi
+}
+run_case stale_state /tmp/testdata/token_stale_probe.txt fail
 echo oauth_e2e_matrix_ok
 '

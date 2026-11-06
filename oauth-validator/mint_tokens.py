@@ -52,7 +52,7 @@ p = b64url(json.dumps({"iss": "https://pg-appsec.test", "aud": "pg_appsec", "sub
 tok = (td / "token_valid.txt").read_text().strip()
 (td / "token_badsig.txt").write_text(tok.rsplit(".", 1)[0] + "." + b64url(b"\x00" * 64))
 state = {
-    "generated_at": "test",
+    "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "active_sessions": [{"sid": sid, "role": role, "user_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "tenant_id": "11111111-1111-1111-1111-111111111111", "expires_at": "2099-01-01", "jti": "test-jti"}],
     "revoked_sids": [],
     "denied_jtis": [],
@@ -85,4 +85,5 @@ def mint_kid(**claims):
 (td / "token_kid.json").write_text("")  # placeholder
 (td / "token_valid_kid.txt").write_text(mint_kid(sub="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", sid=sid, preferred_username=role))
 (td / "token_revoked_sid.txt").write_text(mint(sub="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", sid=sid, preferred_username=role, jti="jti-rev-check"))
+(td / "token_stale_probe.txt").write_text(mint(sub="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", sid=sid, preferred_username=role, jti="jti-stale-probe"))
 print("minted tokens for", role)

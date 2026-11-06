@@ -101,3 +101,10 @@ Default is still per-session DB roles end-to-end. Gateway mode is explicit:
 5. `RESET ROLE` returns to gateway — data access denied.
 
 Assertions are minted only by provisioner/operator with `appsec.gateway_hmac_key` configured server-side.
+
+
+## Gateway session assumption
+
+- Prefer `appsec.assume_session_local(assertion)` inside an explicit `BEGIN`…`COMMIT` (`SET LOCAL ROLE`; ends with the transaction).
+- `appsec.assume_session(assertion)` uses session-scoped `SET ROLE` for autocommit clients; after `RESET ROLE` the gateway login has **zero** table privileges (CI covers spoof/replay/escape).
+- Outside an assumed session, `appsec_gateway` must remain without DML/SELECT on protected tables.

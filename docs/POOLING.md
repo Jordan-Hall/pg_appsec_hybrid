@@ -46,3 +46,13 @@ Per-session roles increase PostgreSQL role and PgBouncer pool cardinality. Load-
 ## Auth user isolation
 
 `config/pg_hba.pooler.example` restricts `pgbouncer_auth` to the pooler host/network. Application HBA should not allow that login from the internet.
+
+
+## CI live pooler matrix
+
+`tests/pooler_e2e.sh` (job **PgBouncer pooler E2E**) brings up PostgreSQL 18 + PgBouncer with client and server TLS, `auth_query` → `appsec.pgbouncer_lookup`, and no forced `user=`. It asserts:
+
+1. Session role A via the pool resolves `appsec.uid()` to A only; B to B; A cannot see B rows.
+2. After revoke + `NOLOGIN`, new pool connections for A are denied; an existing login sees `uid()` NULL.
+3. Transaction mode + `DISCARD ALL` prevents GUC leakage from A to B.
+4. `pgbouncer_auth` cannot `SELECT` application data tables.

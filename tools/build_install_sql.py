@@ -10,6 +10,7 @@ files = [
     "006_custom_rls.sql",
     "007_hardening.sql",
     "008_secdefiner_audit_and_pool.sql",
+    "009_close_remaining_risks.sql",
 ]
 parts = []
 for name in files:

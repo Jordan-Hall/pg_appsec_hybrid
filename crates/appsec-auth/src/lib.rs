@@ -393,6 +393,11 @@ impl AuthService {
                 .fetch_one(&mut *tx)
                 .await?;
         sqlx::query(&grant_base).execute(&mut *tx).await?;
+        sqlx::query("SELECT appsec.harden_session_role($1::name, $2::timestamptz, 2)")
+            .bind(&role)
+            .bind(refresh_expires)
+            .execute(&mut *tx)
+            .await?;
         let user = AuthUser {
             user_id,
             db_role: role.clone(),
@@ -686,6 +691,11 @@ impl AuthService {
         alter_role_password(&mut tx, &user.db_role, &verifier).await?;
         let next_exp = Utc::now() + Duration::days(self.config.refresh_ttl_days);
         alter_role_valid_until(&mut tx, &user.db_role, next_exp).await?;
+        sqlx::query("SELECT appsec.harden_session_role($1::name, $2::timestamptz, 2)")
+            .bind(&user.db_role)
+            .bind(next_exp)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("UPDATE appsec.pool_credentials SET scram_verifier=$2,rotated_at=clock_timestamp(),revoked_at=NULL WHERE session_id=$1")
             .bind(session_id).bind(&verifier).execute(&mut *tx).await?;
         let next_refresh = random_token();
