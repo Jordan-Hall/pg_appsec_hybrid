@@ -11,17 +11,19 @@ docker pull postgres:18
 docker run --name "$NAME" -d --network host -e POSTGRES_PASSWORD=postgres postgres:18
 for i in $(seq 1 60); do docker exec "$NAME" pg_isready -U postgres && break; sleep 1; done
 
-docker exec "$NAME" bash -lc 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libssl-dev postgresql-server-dev-18'
+docker exec "$NAME" bash -lc 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential libssl-dev postgresql-server-dev-18 libpq-dev'
 docker cp "$OV" "$NAME:/tmp/oauth-validator"
 docker exec "$NAME" bash -lc 'make -C /tmp/oauth-validator PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config && install -m 755 /tmp/oauth-validator/pg_appsec_oauth.so "$(pg_config --pkglibdir)/"'
 
 python3 "$OV/mint_tokens.py"
 docker cp "$OV/testdata" "$NAME:/tmp/testdata"
+docker cp "$OV/oauth_client.c" "$NAME:/tmp/oauth_client.c"
 
 docker exec "$NAME" bash -lc 'set -e
 CONF=$(psql -U postgres -Atc "SHOW config_file")
 HBA=$(psql -U postgres -Atc "SHOW hba_file")
-cat >> "$CONF" <<GUC
+# Clear previous appends if re-run
+grep -q "pg_appsec_oauth" "$CONF" || cat >> "$CONF" <<GUC
 shared_preload_libraries = '\''pg_appsec_oauth'\''
 oauth_validator_libraries = '\''pg_appsec_oauth'\''
 pg_appsec.oauth_issuer = '\''https://pg-appsec.test'\''
@@ -36,22 +38,19 @@ HBA
 '
 docker restart "$NAME"
 for i in $(seq 1 60); do docker exec "$NAME" pg_isready -U postgres && break; sleep 1; done
-docker exec "$NAME" psql -U postgres -Atc "SHOW shared_preload_libraries" | grep -q pg_appsec_oauth
+PRELOAD=$(docker exec "$NAME" psql -U postgres -Atc "SHOW shared_preload_libraries" || true)
+echo "preload=$PRELOAD"
+echo "$PRELOAD" | grep -q pg_appsec_oauth
 
 docker exec "$NAME" psql -U postgres -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN CREATE ROLE $ROLE LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;"
 
-# Build oauth_client against container libpq (OAuth hooks)
-LIBDIR=$(docker exec "$NAME" pg_config --libdir)
-INCDIR=$(docker exec "$NAME" pg_config --includedir)
-mkdir -p /tmp/pg18lib /tmp/pg18inc
-docker cp "$NAME:$LIBDIR/." /tmp/pg18lib/
-docker cp "$NAME:$INCDIR/." /tmp/pg18inc/
-cc -o "$OV/oauth_client" "$OV/oauth_client.c" -I/tmp/pg18inc -L/tmp/pg18lib -lpq -Wl,-rpath,/tmp/pg18lib
-
+# Build + run matrix inside container (headers/libpq ABI match)
+docker exec -e ROLE="$ROLE" "$NAME" bash -lc 'set -e
+cc -o /tmp/oauth_client /tmp/oauth_client.c -I$(pg_config --includedir) -L$(pg_config --libdir) -lpq
 run_case() {
   local name=$1 token=$2 expect=$3
   set +e
-  out=$("$OV/oauth_client" 127.0.0.1 5432 postgres "$ROLE" "$token" 2>&1)
+  out=$(/tmp/oauth_client 127.0.0.1 5432 postgres "$ROLE" "$token" 2>&1)
   rc=$?
   set -e
   if [[ $expect == ok ]]; then
@@ -62,7 +61,7 @@ run_case() {
     echo "PASS $name (denied)"
   fi
 }
-TD="$OV/testdata"
+TD=/tmp/testdata
 run_case valid "$TD/token_valid.txt" ok
 run_case badsig "$TD/token_badsig.txt" fail
 run_case expired "$TD/token_expired.txt" fail
@@ -71,3 +70,4 @@ run_case wrong_iss "$TD/token_wrong_iss.txt" fail
 run_case wrong_role "$TD/token_wrong_role.txt" fail
 run_case alg_none "$TD/token_alg_none.txt" fail
 echo oauth_e2e_matrix_ok
+'
