@@ -12,3 +12,5 @@ oauth-validator/oauth_client
 oauth-validator/pg_config*.h
 oauth-validator/postgres_ext.h
 oauth-validator/testdata/
+__pycache__/
+*.pyc
