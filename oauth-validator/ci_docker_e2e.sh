@@ -17,6 +17,7 @@ docker exec "$NAME" bash -lc 'make -C /tmp/oauth-validator PG_CONFIG=/usr/lib/po
 
 python3 "$OV/mint_tokens.py"
 docker cp "$OV/testdata" "$NAME:/tmp/testdata"
+docker exec "$NAME" bash -lc 'chmod -R a+rwX /tmp/testdata; touch /tmp/testdata/jti_denylist.txt; chmod 666 /tmp/testdata/jti_denylist.txt'
 docker cp "$OV/oauth_client.c" "$NAME:/tmp/oauth_client.c"
 
 docker exec "$NAME" bash -lc 'set -e
@@ -31,7 +32,7 @@ pg_appsec.oauth_required_scope = '\''pg_appsec'\''
 pg_appsec.oauth_pubkey_file = '\''/tmp/testdata/ed25519_public.pem'\''
 pg_appsec.oauth_jwks_file = '\''/tmp/testdata/jwks_kid.json'\''
 pg_appsec.oauth_session_state_file = '\''/tmp/testdata/session_state.json'\''
-pg_appsec.oauth_jti_denylist_file = '\''/tmp/testdata/jti_denylist.txt'\''
+pg_appsec.oauth_jti_denylist_file = '\''/var/lib/postgresql/data/jti_seen.txt'\''
 GUC
 TMP=$(mktemp)
 {
@@ -42,6 +43,7 @@ TMP=$(mktemp)
 } > "$TMP"
 cp "$TMP" "$HBA"
 '
+docker exec "$NAME" bash -lc 'touch /var/lib/postgresql/data/jti_seen.txt; chown postgres:postgres /var/lib/postgresql/data/jti_seen.txt; chmod 666 /var/lib/postgresql/data/jti_seen.txt' || true
 docker restart "$NAME"
 for i in $(seq 1 60); do docker exec "$NAME" pg_isready -U postgres && break; sleep 1; done
 PRELOAD=$(docker exec "$NAME" psql -U postgres -Atc "SHOW shared_preload_libraries")
