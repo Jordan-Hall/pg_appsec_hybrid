@@ -29,18 +29,18 @@ pg_appsec.oauth_issuer = '\''https://pg-appsec.test'\''
 pg_appsec.oauth_audience = '\''pg_appsec'\''
 pg_appsec.oauth_required_scope = '\''pg_appsec'\''
 pg_appsec.oauth_pubkey_file = '\''/tmp/testdata/ed25519_public.pem'\''
+pg_appsec.oauth_jwks_file = '\''/tmp/testdata/jwks_kid.json'\''
+pg_appsec.oauth_session_state_file = '\''/tmp/testdata/session_state.json'\''
+pg_appsec.oauth_jti_denylist_file = '\''/tmp/testdata/jti_denylist.txt'\''
 GUC
-# OAuth must be the FIRST host rule for 127.0.0.1; keep local peer/trust for bootstrap.
 TMP=$(mktemp)
 {
-  echo "# pg_appsec oauth e2e — evaluated before default scram/trust host rules"
+  echo "# pg_appsec oauth e2e"
   echo "host all all 127.0.0.1/32 oauth issuer=https://pg-appsec.test scope=pg_appsec validator=pg_appsec_oauth"
   echo "host all all ::1/128 oauth issuer=https://pg-appsec.test scope=pg_appsec validator=pg_appsec_oauth"
-  # local socket for docker exec psql (peer/trust)
   grep -E "^(local|host)" "$HBA" | grep -v "127.0.0.1/32 oauth" | grep -v "::1/128 oauth" || true
 } > "$TMP"
 cp "$TMP" "$HBA"
-cat "$HBA"
 '
 docker restart "$NAME"
 for i in $(seq 1 60); do docker exec "$NAME" pg_isready -U postgres && break; sleep 1; done
@@ -48,7 +48,6 @@ PRELOAD=$(docker exec "$NAME" psql -U postgres -Atc "SHOW shared_preload_librari
 echo "preload=$PRELOAD"
 echo "$PRELOAD" | grep -q pg_appsec_oauth
 
-# Role create via local socket (not host oauth)
 docker exec "$NAME" psql -U postgres -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN CREATE ROLE $ROLE LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;"
 
 docker exec -e ROLE="$ROLE" "$NAME" bash -lc 'set -e
@@ -70,11 +69,16 @@ run_case() {
 }
 TD=/tmp/testdata
 run_case valid "$TD/token_valid.txt" ok
+run_case jti_replay "$TD/token_valid.txt" fail
 run_case badsig "$TD/token_badsig.txt" fail
 run_case expired "$TD/token_expired.txt" fail
 run_case wrong_aud "$TD/token_wrong_aud.txt" fail
 run_case wrong_iss "$TD/token_wrong_iss.txt" fail
 run_case wrong_role "$TD/token_wrong_role.txt" fail
 run_case alg_none "$TD/token_alg_none.txt" fail
+run_case kid_jwks "$TD/token_valid_kid.txt" ok
+# Swap session state to revoked — file contents only (GUC path unchanged)
+cp "$TD/session_state_revoked.json" "$TD/session_state.json"
+run_case revoked_sid "$TD/token_revoked_sid.txt" fail
 echo oauth_e2e_matrix_ok
 '

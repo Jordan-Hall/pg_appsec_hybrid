@@ -17,7 +17,11 @@ Fail-closed validator for internal pg_appsec access tokens. Supports **EdDSA**, 
 | `pg_appsec.oauth_required_scope` | Required scope token (default `pg_appsec`) |
 | `pg_appsec.oauth_pubkey_file` | PEM public key file (Ed25519 / RSA / EC) |
 | `pg_appsec.oauth_jwks_file` | Optional JWKS/PEM JSON helper file |
-| `pg_appsec.oauth_clock_skew` | Skew seconds (default 60) |
+| `pg_appsec.oauth_clock_skew_secs` | Skew seconds (default 60) |
+| `pg_appsec.oauth_session_state_file` | JSON from `appsec.export_oauth_session_state()` for connect-time allow/deny |
+| `pg_appsec.oauth_jti_denylist_file` | Denied jti list |
+| `pg_appsec.oauth_issuer_map_file` | Optional per-tenant issuer allowlist |
+| `pg_appsec.oauth_jwks_file` | JWKS with `keys[].kid` + `pem` for rotation |
 
 Load with `shared_preload_libraries` / `oauth_validator_libraries = 'pg_appsec_oauth'` and an `oauth` HBA line.
 

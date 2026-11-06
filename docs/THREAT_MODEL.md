@@ -66,3 +66,18 @@ TLS with certificate verification; secrets in a secret manager; short-lived acce
 - `define_table_permissions` / `define_field_permissions` are admin/owner-only, validate expressions, quote identifiers, FORCE RLS, and use RESTRICTIVE policies for optional tenant columns.
 - Field select masking uses security-barrier views (`*_secured`); field updates are guarded by triggers. Treat expression validation as defense-in-depth, not a full SQL sandbox.
 - Domino ACL remains optional and composable: RESTRICTIVE tenant policies AND with permissive DSL/hand policies; permissive policies OR with each other.
+
+
+## What is protected and from whom
+
+| Asset / boundary | Protected by | Against whom |
+|---|---|---|
+| End-user data rows (`documents`, DSL tables) | FORCE RLS + `appsec.uid()`/`tenant_id()` from `session_user` or gateway `current_user` | Other tenants/users, stolen GUCs, shared pool users |
+| Connect-time OAuth login | Validator: sig/iss/aud/exp + session-state file + jti denylist/replay + role bind + kid JWKS | Revoked/expired/unknown sessions, alg none/HS*, wrong role, replayed jti |
+| PgBouncer pool login | Per-session SCRAM via `pgbouncer_lookup` (active sessions only); no forced `user=`; TLS required | Revoked sessions, shared backend user, cleartext pool passwords |
+| Opt-in app gateway | `appsec_gateway` has no table privs; `assume_session` verifies HMAC assertion then `SET ROLE` | Spoofed assertions, replay, `SET ROLE` to foreign sessions, post-`RESET ROLE` data access |
+| SECURITY DEFINER surface | Fixed `search_path`, `REVOKE PUBLIC`, CI audit | search_path hijack, accidental PUBLIC execute |
+| New tables in `appsec` | Event trigger ENABLE+FORCE RLS | Accidentally open tables |
+| Audit trail | Append-only hash-chained `security_audit_chain` | Silent ACL/login tampering (detection, not prevention of DB superuser) |
+| Database ACL ceiling | `database_acl_caps.max_access_level` | Over-privileged ACL grants |
+| Public schema | `REVOKE CREATE` from PUBLIC; TEMP revoked where possible | Object object persistence / temp abuse |

@@ -88,3 +88,16 @@ Example: a table can have RESTRICTIVE tenant isolation **and** permissive owner 
 - Field `select_expr` masking is enforced through `*_secured` security-barrier views (column SELECT revoked on base table). Direct `SELECT secret FROM notes` is denied for app roles when a field select policy exists.
 - Field `update_expr` is enforced by `appsec_field_update_guard` (cannot be bypassed by column UPDATE grants alone under FORCE RLS + trigger).
 - Independent review still required before production (especially OAuth crypto and SECURITY DEFINER surface).
+
+
+## Application gateway mode (opt-in)
+
+Default is still per-session DB roles end-to-end. Gateway mode is explicit:
+
+1. Provisioner grants `app_s_<sid>` to `appsec_gateway` (`grant_session_role_to_gateway`).
+2. Edge process logs in as a member of `appsec_gateway` (no table privileges).
+3. `SELECT appsec.assume_session(minted_assertion);` verifies HMAC + audience + expiry + one-time jti, then `SET ROLE` to the session role.
+4. `appsec.uid()` resolves via `current_user` when it is `app_s_*` (because `session_user` remains the gateway).
+5. `RESET ROLE` returns to gateway — data access denied.
+
+Assertions are minted only by provisioner/operator with `appsec.gateway_hmac_key` configured server-side.

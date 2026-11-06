@@ -43,8 +43,15 @@ static char *g_pubkey_path = NULL;
 static char *g_required_scope = NULL;
 static int	g_clock_skew = 60;
 static int	g_max_token_bytes = 8192;
+static char *g_session_state_file = NULL;
+static char *g_jti_denylist_file = NULL;
+static char *g_issuer_map_file = NULL;
 
 #define MAX_CLAIM 512
+#define JTI_SEEN_CAP 4096
+static char	jti_seen[JTI_SEEN_CAP][MAX_CLAIM];
+static int	jti_seen_n = 0;
+
 
 typedef struct JwtParts
 {
@@ -271,18 +278,33 @@ load_pubkey_pem(const char *path)
 }
 
 static EVP_PKEY *
-load_pubkey_from_jwks(const char *path, const char *alg)
+pem_to_pkey(const char *pem)
+{
+	BIO		   *bio;
+	EVP_PKEY   *pkey;
+
+	bio = BIO_new_mem_buf(pem, -1);
+	if (!bio)
+		return NULL;
+	pkey = PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
+	BIO_free(bio);
+	return pkey;
+}
+
+static EVP_PKEY *
+load_pubkey_from_jwks(const char *path, const char *alg, const char *kid)
 {
 	/*
-	 * Minimal JWKS: prefer a PEM sibling when present. Full JWK RSA/OKP
-	 * import is complex; we also accept a top-level {"pem":"-----BEGIN..."}.
+	 * JWKS shapes supported:
+	 * 1) {"pem":"-----BEGIN..."} (legacy)
+	 * 2) {"keys":[{"kid":"...","pem":"-----BEGIN..."}, ...]} for rotation
 	 */
 	FILE	   *f;
 	char	   *buf;
 	long		sz;
 	char		pem[8192];
-	BIO		   *bio;
 	EVP_PKEY   *pkey = NULL;
+	const char *p;
 
 	(void) alg;
 	if (!path || path[0] == '\0')
@@ -312,17 +334,174 @@ load_pubkey_from_jwks(const char *path, const char *alg)
 	fclose(f);
 	buf[sz] = '\0';
 
-	if (json_get_string(buf, (size_t) sz, "pem", pem, sizeof(pem)))
+	if (kid && kid[0] != '\0')
 	{
-		bio = BIO_new_mem_buf(pem, -1);
-		if (bio)
+		/* naive scan: find "kid":"<kid>" then nearest "pem" afterward in the same object */
+		char		needle[MAX_CLAIM + 16];
+		const char *hit;
+
+		snprintf(needle, sizeof(needle), "\"kid\":\"%s\"", kid);
+		hit = strstr(buf, needle);
+		if (hit)
 		{
-			pkey = PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
-			BIO_free(bio);
+			const char *obj_end = strchr(hit, '}');
+			const char *pem_key = strstr(hit, "\"pem\"");
+
+			if (pem_key && obj_end && pem_key < obj_end)
+			{
+				if (json_get_string(pem_key, (size_t) (obj_end - pem_key) + 1, "pem", pem, sizeof(pem)))
+					pkey = pem_to_pkey(pem);
+			}
 		}
+	}
+	if (!pkey && json_get_string(buf, (size_t) sz, "pem", pem, sizeof(pem)))
+		pkey = pem_to_pkey(pem);
+	/* fallback: first keys[].pem */
+	if (!pkey && (p = strstr(buf, "\"pem\"")) != NULL)
+	{
+		if (json_get_string(p, strlen(p), "pem", pem, sizeof(pem)))
+			pkey = pem_to_pkey(pem);
 	}
 	pfree(buf);
 	return pkey;
+}
+
+static bool
+file_contains_line_or_json_value(const char *path, const char *needle)
+{
+	FILE	   *f;
+	char		line[4096];
+
+	if (!path || path[0] == '\0' || !needle || needle[0] == '\0')
+		return false;
+	f = fopen(path, "r");
+	if (!f)
+		return false;
+	while (fgets(line, sizeof(line), f))
+	{
+		if (strstr(line, needle) != NULL)
+		{
+			fclose(f);
+			return true;
+		}
+	}
+	fclose(f);
+	return false;
+}
+
+static bool
+session_state_allows(const char *sid, const char *role)
+{
+	FILE	   *f;
+	char	   *buf;
+	long		sz;
+	bool		ok = false;
+	char		role_needle[128];
+	char		sid_needle[128];
+
+	/* If no state file configured, allow (RLS still enforces post-connect). */
+	if (!g_session_state_file || g_session_state_file[0] == '\0')
+		return true;
+	f = fopen(g_session_state_file, "r");
+	if (!f)
+		return false;			/* fail closed when configured but missing */
+	if (fseek(f, 0, SEEK_END) != 0)
+	{
+		fclose(f);
+		return false;
+	}
+	sz = ftell(f);
+	if (sz <= 0 || sz > 8 * 1024 * 1024)
+	{
+		fclose(f);
+		return false;
+	}
+	rewind(f);
+	buf = palloc((size_t) sz + 1);
+	if (fread(buf, 1, (size_t) sz, f) != (size_t) sz)
+	{
+		fclose(f);
+		pfree(buf);
+		return false;
+	}
+	fclose(f);
+	buf[sz] = '\0';
+
+	/* Revoked list wins. */
+	snprintf(sid_needle, sizeof(sid_needle), "%s", sid);
+	if (strstr(buf, "\"revoked_sids\"") && strstr(buf, sid_needle))
+	{
+		/* crude: if sid appears inside revoked_sids array region — treat as deny if listed after key */
+		const char *rev = strstr(buf, "\"revoked_sids\"");
+		const char *act = strstr(buf, "\"active_sessions\"");
+		const char *hit = strstr(rev, sid);
+
+		if (hit && (!act || hit < act || (act && hit < strstr(act, "]") && rev < act)))
+		{
+			/* if hit is between revoked_sids and next major key */
+			const char *end = strchr(rev, ']');
+
+			if (end && hit < end)
+			{
+				pfree(buf);
+				return false;
+			}
+		}
+	}
+
+	snprintf(role_needle, sizeof(role_needle), "\"role\":\"%s\"", role);
+	if (strstr(buf, sid) && strstr(buf, role_needle))
+		ok = true;
+	pfree(buf);
+	return ok;
+}
+
+static bool
+jti_denied(const char *jti)
+{
+	int			i;
+
+	if (!jti || jti[0] == '\0')
+		return true;
+	if (g_jti_denylist_file && g_jti_denylist_file[0] != '\0'
+		&& file_contains_line_or_json_value(g_jti_denylist_file, jti))
+		return true;
+	for (i = 0; i < jti_seen_n; i++)
+	{
+		if (strcmp(jti_seen[i], jti) == 0)
+			return true;		/* replay within process lifetime */
+	}
+	return false;
+}
+
+static void
+jti_remember(const char *jti)
+{
+	if (!jti || jti[0] == '\0')
+		return;
+	if (jti_seen_n < JTI_SEEN_CAP)
+	{
+		snprintf(jti_seen[jti_seen_n], MAX_CLAIM, "%s", jti);
+		jti_seen_n++;
+	}
+}
+
+static bool
+issuer_allowed_for_tenant(const char *iss, const char *tenant_id)
+{
+	/* Optional map file: JSON {"https://issuer": ["tenant-uuid", ...]} or flat allowlist of issuers. */
+	if (!g_issuer_map_file || g_issuer_map_file[0] == '\0')
+		return true;			/* rely on global g_issuer pin */
+	if (!file_contains_line_or_json_value(g_issuer_map_file, iss))
+		return false;
+	if (tenant_id && tenant_id[0] != '\0'
+		&& !file_contains_line_or_json_value(g_issuer_map_file, tenant_id))
+	{
+		/* If file has tenant lists, require tenant mention; if only issuers, tenant check soft-pass when tenant absent from file entirely. */
+		if (file_contains_line_or_json_value(g_issuer_map_file, "tenant"))
+			return false;
+	}
+	return true;
 }
 
 static bool
@@ -461,6 +640,9 @@ pg_appsec_validate(const ValidatorModuleState *state,
 	char		token_use[64] = {0};
 	char		scope[MAX_CLAIM] = {0};
 	char		expect_role[80] = {0};
+	char		kid[MAX_CLAIM] = {0};
+	char		jti[MAX_CLAIM] = {0};
+	char		tenant[MAX_CLAIM] = {0};
 	int64_t		exp = 0,
 				nbf = 0,
 				iat = 0;
@@ -480,6 +662,7 @@ pg_appsec_validate(const ValidatorModuleState *state,
 
 	if (!json_get_string((const char *) jp.hdr_json, jp.hdr_len, "alg", alg, sizeof(alg)))
 		return true;
+	json_get_string((const char *) jp.hdr_json, jp.hdr_len, "kid", kid, sizeof(kid));
 	if (strcmp(alg, "none") == 0 || strncmp(alg, "HS", 2) == 0)
 		return true;
 	if (strcmp(alg, "RS256") != 0 && strcmp(alg, "ES256") != 0 && strcmp(alg, "EdDSA") != 0)
@@ -487,7 +670,7 @@ pg_appsec_validate(const ValidatorModuleState *state,
 
 	pkey = load_pubkey_pem(g_pubkey_path);
 	if (!pkey)
-		pkey = load_pubkey_from_jwks(g_jwks_path, alg);
+		pkey = load_pubkey_from_jwks(g_jwks_path, alg, kid);
 	if (!pkey)
 		return true;
 
@@ -537,12 +720,23 @@ pg_appsec_validate(const ValidatorModuleState *state,
 	if (strcmp(role, expect_role) != 0 || strcmp(role, pref) != 0)
 		return true;
 
+	if (!json_get_string((const char *) jp.pay_json, jp.pay_len, "jti", jti, sizeof(jti)))
+		return true;
+	json_get_string((const char *) jp.pay_json, jp.pay_len, "tenant_id", tenant, sizeof(tenant));
+
+	if (!issuer_allowed_for_tenant(iss, tenant))
+		return true;
+	if (jti_denied(jti))
+		return true;
 	/*
-	 * Session revocation is enforced by appsec.uid() / RLS on every
-	 * statement after connect (session_principals + sessions). The
-	 * validator intentionally does not open a DB connection during
-	 * authentication.
+	 * Connect-time session check via auth-service-exported state file
+	 * (no SQL from the validator). When configured, missing/revoked/unknown
+	 * sessions fail closed here; RLS still re-checks every statement.
 	 */
+	if (!session_state_allows(sid, role))
+		return true;
+
+	jti_remember(jti);
 	result->authorized = true;
 	result->authn_id = pstrdup(pref);
 	return true;
@@ -609,6 +803,27 @@ _PG_init(void)
 							256, 65536,
 							PGC_SIGHUP,
 							0, NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_appsec.oauth_session_state_file",
+							   "JSON file of active/revoked sessions for connect-time checks",
+							   NULL,
+							   &g_session_state_file,
+							   "",
+							   PGC_SIGHUP,
+							   0, NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_appsec.oauth_jti_denylist_file",
+							   "File listing denied JWT jti values",
+							   NULL,
+							   &g_jti_denylist_file,
+							   "",
+							   PGC_SIGHUP,
+							   0, NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_appsec.oauth_issuer_map_file",
+							   "Optional per-tenant issuer allowlist/map file",
+							   NULL,
+							   &g_issuer_map_file,
+							   "",
+							   PGC_SIGHUP,
+							   0, NULL, NULL, NULL);
 }
 
 __attribute__((visibility("default"))) PGDLLEXPORT const OAuthValidatorCallbacks *

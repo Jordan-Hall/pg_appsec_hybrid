@@ -1,0 +1,6 @@
+# Restrict appsec_pool_auth / pgbouncer_auth to the pooler host only.
+# local all postgres peer
+hostssl all pgbouncer_auth 10.0.0.0/8 scram-sha-256
+hostssl all app_s_ 10.0.0.0/8 scram-sha-256
+host all pgbouncer_auth 0.0.0.0/0 reject
+# Application sessions never share a forced user= in PgBouncer.

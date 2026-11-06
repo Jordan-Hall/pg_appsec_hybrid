@@ -68,13 +68,17 @@ jobs:
         run: |
           for f in sql/001_roles.sql sql/002_schema.sql sql/003_policies.sql \
                    sql/004_identity_sessions_acl.sql sql/005_schema_security.sql \
-                   sql/006_custom_rls.sql; do
+                   sql/006_custom_rls.sql sql/007_hardening.sql sql/008_secdefiner_audit_and_pool.sql; do
             psql -v ON_ERROR_STOP=1 -f "$f"
           done
       - name: Run adversarial SQL tests
         run: psql -v ON_ERROR_STOP=1 -f tests/pg_appsec_adversarial.sql
       - name: Run security regression (custom RLS + ACL)
         run: psql -v ON_ERROR_STOP=1 -f tests/security_regression.sql
+      - name: SECURITY DEFINER / RLS audit
+        run: psql -v ON_ERROR_STOP=1 -f tests/security_audit_ci.sql
+      - name: Hardening regression (gateway, audit chain, pool revoke, ACL cap)
+        run: psql -v ON_ERROR_STOP=1 -f tests/hardening_regression.sql
 
   oauth-validator:
     name: OAuth validator E2E (PG18)

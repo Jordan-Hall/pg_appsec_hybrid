@@ -1,8 +1,6 @@
 # Build and verification status
 
-- SQL migrations `001`–`006` install roles, schema, Domino ACL, identity/session principals, schema lockdown, and Surreal-style custom RLS helpers/DSL.
-- Rust `pg-appsec-auth` crate: signup/signin, per-session role provisioning, SCRAM verifiers, EdDSA access tokens, refresh rotation, revocation.
-- TypeScript SDK facade typechecks under TypeScript 5.8.3.
-- PostgreSQL 18 OAuth validator (`oauth-validator/pg_appsec_oauth.c`) verifies EdDSA/RS256/ES256, rejects `none`/HS*, pins iss/aud/scope/`token_use=access`, maps `preferred_username` to `app_s_<sid>`.
-- CI: Rust/clippy/fmt + TS; SQL adversarial + security regression (helpers, DSL, ACL, GUC spoof); PgBouncer forced-`user=` ban; OAuth token matrix on PG18.
-- **Honest limits:** OAuth crypto and SECURITY DEFINER surface need independent review before production. Session revocation for OAuth is enforced by `appsec.uid()`/RLS after connect (and optional role `NOLOGIN`), not by a connect-time denylist inside the validator. PgBouncer does not passthrough PG OAuth — use SCRAM pool credentials for pooled traffic.
+- Migrations `001`–`008`: roles, schema, Domino ACL, identity/sessions, schema lockdown, custom RLS DSL, gateway/audit/defaults, SECURITY DEFINER audit + pool lockdown.
+- OAuth validator: EdDSA/RS256/ES256, connect-time session-state file, jti denylist + in-process replay cache, kid JWKS rotation, role binding.
+- CI: Rust/TS; SQL adversarial + custom RLS regression + SECURITY DEFINER audit + hardening regression; PgBouncer forced-user ban; OAuth Docker E2E matrix (valid, replay, badsig, expired, aud/iss/role, alg none, kid, revoked sid).
+- Honest limits: independent crypto review still required; session-state file must be synced by the auth service (validator does not query SQL at connect); gateway HMAC key management is operationally critical; hash chain does not stop a superuser.

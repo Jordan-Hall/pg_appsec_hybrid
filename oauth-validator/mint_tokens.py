@@ -51,4 +51,42 @@ p = b64url(json.dumps({"iss": "https://pg-appsec.test", "aud": "pg_appsec", "sub
 (td / "token_alg_none.txt").write_text(f"{h}.{p}.")
 tok = (td / "token_valid.txt").read_text().strip()
 (td / "token_badsig.txt").write_text(tok.rsplit(".", 1)[0] + "." + b64url(b"\x00" * 64))
+state = {
+    "generated_at": "test",
+    "active_sessions": [{"sid": sid, "role": role, "user_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "tenant_id": "11111111-1111-1111-1111-111111111111", "expires_at": "2099-01-01", "jti": "test-jti"}],
+    "revoked_sids": [],
+    "denied_jtis": [],
+}
+(td / "session_state.json").write_text(json.dumps(state))
+(td / "session_state_revoked.json").write_text(json.dumps({
+    "active_sessions": [],
+    "revoked_sids": [sid],
+    "denied_jtis": ["denied-jti"],
+}))
+(td / "jti_denylist.txt").write_text("denied-jti\n")
+# JWKS with kid for rotation
+pub_pem = pub_path.read_text()
+(td / "jwks_kid.json").write_text(json.dumps({"keys": [{"kid": "k1", "pem": pub_pem}]}))
+# token with kid header
+def mint_kid(**claims):
+    hdr = {"alg": "EdDSA", "typ": "JWT", "kid": "k1"}
+    now = int(time.time())
+    body = {
+        "iss": "https://pg-appsec.test",
+        "aud": "pg_appsec",
+        "token_use": "access",
+        "scope": "openid pg_appsec",
+        "iat": now,
+        "nbf": now,
+        "exp": now + 900,
+        "jti": "test-jti-kid",
+        **claims,
+    }
+    h = b64url(json.dumps(hdr, separators=(",", ":")).encode())
+    p = b64url(json.dumps(body, separators=(",", ":")).encode())
+    msg = f"{h}.{p}".encode()
+    return f"{h}.{p}.{b64url(priv.sign(msg))}"
+(td / "token_kid.json").write_text("")  # placeholder
+(td / "token_valid_kid.txt").write_text(mint_kid(sub="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", sid=sid, preferred_username=role))
+(td / "token_revoked_sid.txt").write_text(mint(sub="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", sid=sid, preferred_username=role, jti="jti-rev-check"))
 print("minted tokens for", role)

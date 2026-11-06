@@ -32,3 +32,17 @@ Per-session roles increase PostgreSQL role and PgBouncer pool cardinality. Load-
 ## PgBouncer reset
 
 `config/pgbouncer-transaction.ini` sets `server_reset_query = DISCARD ALL` and `server_reset_query_always = 1` so session state cannot leak across clients sharing a backend. Never configure a forced database `user=` for application traffic; CI runs `tools/check_pgbouncer_no_forced_user.sh`.
+
+
+## Supported pool pattern (PgBouncer cannot passthrough PG OAuth)
+
+1. Auth service mints `app_s_<sid>` + random SCRAM secret; stores verifier in `pool_credentials`.
+2. Client connects to PgBouncer as that role with the short-lived secret (TLS required).
+3. `auth_user=pgbouncer_auth` (member of `appsec_pool_auth` only) runs `appsec.pgbouncer_lookup($1)` — returns verifier only for active, unrevoked sessions/users/tenants.
+4. Never set forced database `user=`. `DISCARD ALL` on release.
+5. On revoke: mark session + pool_credentials revoked, `NOLOGIN` the role; lookup returns no row so reconnect fails.
+6. Alternatives if you need different poolers: pgcat/Odyssey/Supavisor must preserve per-session backend auth the same way — no shared user.
+
+## Auth user isolation
+
+`config/pg_hba.pooler.example` restricts `pgbouncer_auth` to the pooler host/network. Application HBA should not allow that login from the internet.

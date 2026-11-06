@@ -25,3 +25,9 @@ This is a target matrix, not a claim of complete parity.
 ## Release gates
 
 No production claim until: OAuth validator passes independent review; role provisioning and password/session service are complete; RLS/ACL/JSONB privilege tests pass under app roles; pooler matrix proves identity isolation; fuzzing and load testing are complete; migration/upgrade/rollback tests pass; supported PostgreSQL 18 minor releases are tested.
+
+
+| Connect-time revocation | Session/token revoke | OAuth session-state file + jti denylist; pool lookup deny; `uid()` post-connect |
+| App gateway | Optional shared edge | Opt-in `appsec_gateway` + `assume_session` (no table privs) |
+| Audit hash chain | Domino-style audit | `security_audit_chain` append-only SHA-256 chain |
+| Enforce RLS on create | Consistent ACL | Event trigger on `CREATE TABLE` in `appsec` |
