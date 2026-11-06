@@ -1,0 +1,7 @@
+comment = 'PostgreSQL-native application identity, RLS and Domino-style ACLs'
+default_version = '0.1.0'
+module_pathname = '$libdir/pg_appsec'
+relocatable = false
+schema = 'appsec'
+requires = 'plpgsql'
+superuser = true

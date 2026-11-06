@@ -1,0 +1,11 @@
+# Recorda build and verification status
+
+- Added an installable pgrx PostgreSQL 18 extension shell, generated extension install script and ordered SQL migrations for tenant/user/identity/group/role/session tables, per-session PostgreSQL login principals, SCRAM verifier lookup for PgBouncer, native RLS, Domino-style database ACLs and Readers/Authors users/groups/roles, JSONB field policies, and generic tenant/owner RLS plus column-grant helpers.
+- Added a Rust auth-service source crate for tenant-scoped signup, email verification, Argon2id password sign-in, per-session role provisioning, PostgreSQL SCRAM verifier generation, EdDSA access tokens, refresh rotation/reuse detection, session revocation, account disable/enable, security audit events and expired-session reaping.
+- Added a TypeScript SDK facade, auth transport contract, session/transaction PgBouncer templates, PostgreSQL 18 OAuth validator contract and a fail-closed C module skeleton.
+- Added adversarial SQL smoke tests for session-principal resolution, caller-set GUC spoofing, JSONB projection, raw JSONB column denial, user-specific No Access precedence, and pool credential revocation.
+- TypeScript SDK strict typecheck passes with TypeScript 5.8.3. The pgrx extension shell is source-only and has not been compiled.
+- No Rust toolchain, PostgreSQL client/server, or PostgreSQL 18 server headers were available in the authoring environment. Rust compilation/tests, SQL migration execution, PGXS C compilation, PgBouncer integration, and end-to-end OAuth login have therefore **not** been run.
+- The OAuth validator deliberately fails closed and rejects all tokens. Direct PostgreSQL OAuth is not operational until the validator callback is implemented, compiled against PostgreSQL 18, and reviewed.
+- The Rust crate is a library, not a hosted HTTP service. An application adapter must expose its operations, derive tenant context from trusted routing/invitation state, pass the bearer token to token-gated methods, and never accept actor/user IDs from request bodies.
+- This is an advanced prototype, not a production release. No claim of complete SurrealDB or HCL Domino feature parity is made. Review `docs/PARITY.md`, `docs/ROADMAP.md`, and `docs/THREAT_MODEL.md` before deployment.

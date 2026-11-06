@@ -1,0 +1,27 @@
+[package]
+name = "pg_appsec"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Rust security primitives and PostgreSQL-native application identity architecture"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[features]
+default = []
+pg18 = ["pgrx/pg18"]
+
+[dependencies]
+pgrx = { version = "=0.16.1", default-features = false }
+argon2 = "0.5.3"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+thiserror = "1.0"
+zeroize = { version = "1.8", features = ["derive"] }
+
+[dev-dependencies]
+
+[workspace]
+members = ["crates/appsec-auth"]
+resolver = "2"

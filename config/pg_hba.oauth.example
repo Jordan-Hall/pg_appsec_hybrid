@@ -1,0 +1,8 @@
+# PostgreSQL 18 direct OAuth path. The validator must verify the token's
+# preferred_username equals the requested app_s_<session UUID> role and return
+# that exact role as authn_id. RLS then validates the session_principals row.
+hostssl all all 10.0.0.0/8 oauth issuer="https://identity.example.com" scope="openid pg_app" validator="pg_appsec_oauth"
+
+# Do not enable delegate_ident_mapping. Exact role matching is intentional.
+# PgBouncer session/transaction pooling uses per-session SCRAM roles instead;
+# see config/pgbouncer-*.ini and docs/POOLING.md.

@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-and-sdk:
+    name: Rust and TypeScript checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test authentication library
+        run: cargo test -p pg-appsec-auth --all-targets
+      - name: Lint authentication library
+        run: cargo clippy -p pg-appsec-auth --all-targets -- -D warnings
+      - name: Typecheck TypeScript SDK
+        run: npx --yes --package typescript@5.8.3 tsc --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext sdk/typescript/index.ts
+
+  postgres-integration:
+    name: PostgreSQL 18 SQL integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: appsec_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d appsec_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: appsec_test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Apply SQL migrations
+        run: |
+          psql -v ON_ERROR_STOP=1 -f sql/001_roles.sql
+          psql -v ON_ERROR_STOP=1 -f sql/002_schema.sql
+          psql -v ON_ERROR_STOP=1 -f sql/003_policies.sql
+          psql -v ON_ERROR_STOP=1 -f sql/004_identity_sessions_acl.sql
+          psql -v ON_ERROR_STOP=1 -f sql/005_schema_security.sql
+      - name: Run adversarial SQL tests
+        run: psql -v ON_ERROR_STOP=1 -f tests/pg_appsec_adversarial.sql
