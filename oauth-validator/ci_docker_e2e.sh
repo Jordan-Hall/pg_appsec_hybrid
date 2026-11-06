@@ -22,7 +22,6 @@ docker cp "$OV/oauth_client.c" "$NAME:/tmp/oauth_client.c"
 docker exec "$NAME" bash -lc 'set -e
 CONF=$(psql -U postgres -Atc "SHOW config_file")
 HBA=$(psql -U postgres -Atc "SHOW hba_file")
-# Clear previous appends if re-run
 grep -q "pg_appsec_oauth" "$CONF" || cat >> "$CONF" <<GUC
 shared_preload_libraries = '\''pg_appsec_oauth'\''
 oauth_validator_libraries = '\''pg_appsec_oauth'\''
@@ -31,20 +30,27 @@ pg_appsec.oauth_audience = '\''pg_appsec'\''
 pg_appsec.oauth_required_scope = '\''pg_appsec'\''
 pg_appsec.oauth_pubkey_file = '\''/tmp/testdata/ed25519_public.pem'\''
 GUC
-grep -q "validator=pg_appsec_oauth" "$HBA" || cat >> "$HBA" <<HBA
-host all all 127.0.0.1/32 oauth issuer=https://pg-appsec.test scope=pg_appsec validator=pg_appsec_oauth
-host all all 127.0.0.1/32 scram-sha-256
-HBA
+# OAuth must be the FIRST host rule for 127.0.0.1; keep local peer/trust for bootstrap.
+TMP=$(mktemp)
+{
+  echo "# pg_appsec oauth e2e — evaluated before default scram/trust host rules"
+  echo "host all all 127.0.0.1/32 oauth issuer=https://pg-appsec.test scope=pg_appsec validator=pg_appsec_oauth"
+  echo "host all all ::1/128 oauth issuer=https://pg-appsec.test scope=pg_appsec validator=pg_appsec_oauth"
+  # local socket for docker exec psql (peer/trust)
+  grep -E "^(local|host)" "$HBA" | grep -v "127.0.0.1/32 oauth" | grep -v "::1/128 oauth" || true
+} > "$TMP"
+cp "$TMP" "$HBA"
+cat "$HBA"
 '
 docker restart "$NAME"
 for i in $(seq 1 60); do docker exec "$NAME" pg_isready -U postgres && break; sleep 1; done
-PRELOAD=$(docker exec "$NAME" psql -U postgres -Atc "SHOW shared_preload_libraries" || true)
+PRELOAD=$(docker exec "$NAME" psql -U postgres -Atc "SHOW shared_preload_libraries")
 echo "preload=$PRELOAD"
 echo "$PRELOAD" | grep -q pg_appsec_oauth
 
+# Role create via local socket (not host oauth)
 docker exec "$NAME" psql -U postgres -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN CREATE ROLE $ROLE LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;"
 
-# Build + run matrix inside container (headers/libpq ABI match)
 docker exec -e ROLE="$ROLE" "$NAME" bash -lc 'set -e
 cc -o /tmp/oauth_client /tmp/oauth_client.c -I$(pg_config --includedir) -L$(pg_config --libdir) -lpq
 run_case() {
@@ -53,11 +59,12 @@ run_case() {
   out=$(/tmp/oauth_client 127.0.0.1 5432 postgres "$ROLE" "$token" 2>&1)
   rc=$?
   set -e
+  echo "$out"
   if [[ $expect == ok ]]; then
-    [[ $rc -eq 0 ]] || { echo "FAIL $name: $out"; exit 1; }
+    [[ $rc -eq 0 ]] || { echo "FAIL $name expected ok"; exit 1; }
     echo "PASS $name"
   else
-    [[ $rc -ne 0 ]] || { echo "FAIL $name expected deny: $out"; exit 1; }
+    [[ $rc -ne 0 ]] || { echo "FAIL $name expected deny"; exit 1; }
     echo "PASS $name (denied)"
   fi
 }
