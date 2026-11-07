@@ -325,7 +325,7 @@ impl AuthService {
         let row = sqlx::query(concat!(
             "SELECT u.user_id,u.email,u.tenant_id,u.status,t.status AS tenant_status,c.password_phc,c.failed_attempts,c.locked_until ",
             "FROM appsec.users u JOIN appsec.tenants t USING(tenant_id) JOIN appsec.credentials c USING(user_id) ",
-            "WHERE lower(u.email)=lower($1) AND u.tenant_id=$2 FOR UPDATE OF u,c,t"
+            "WHERE lower(u.email)=lower($1) AND u.tenant_id=$2 FOR UPDATE OF u,c"
         )).bind(&normalized_email).bind(tenant_id).fetch_optional(&mut *tx).await?;
         let Some(row) = row else {
             let _ = verify_password(password, DUMMY_PASSWORD_PHC).unwrap_or(false);
@@ -628,7 +628,7 @@ impl AuthService {
         let row = sqlx::query(concat!(
             "SELECT t.token_id,t.session_id,t.consumed_at,t.revoked_at,t.expires_at,s.user_id,s.revoked_at AS session_revoked,s.expires_at AS session_expires,u.email,u.tenant_id,u.status,ten.status AS tenant_status,sp.db_role ",
             "FROM appsec.refresh_tokens t JOIN appsec.sessions s USING(session_id) JOIN appsec.users u USING(user_id) ",
-            "JOIN appsec.tenants ten USING(tenant_id) JOIN appsec.session_principals sp USING(session_id,user_id) WHERE t.token_hash=$1 FOR UPDATE OF t,s,u,ten"
+            "JOIN appsec.tenants ten USING(tenant_id) JOIN appsec.session_principals sp USING(session_id,user_id) WHERE t.token_hash=$1 FOR UPDATE OF t,s,u"
         )).bind(old_hash.to_vec()).fetch_optional(&mut *tx).await?;
         let Some(row) = row else {
             return Err(AuthError::InvalidRefresh);
