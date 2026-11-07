@@ -50,7 +50,9 @@ docker run -d --name pgappsec-pg --network "$NET" \
 
 for i in $(seq 1 90); do
   docker exec pgappsec-pg pg_isready -U postgres -d appsec_test >/dev/null 2>&1 && \
-    docker exec pgappsec-pg psql -U postgres -Atc 'SELECT 1' >/dev/null 2>&1 && break
+    docker exec -e PGPASSWORD=postgres pgappsec-pg \
+      psql "host=127.0.0.1 dbname=appsec_test user=postgres sslmode=require" -Atc 'SELECT 1' >/dev/null 2>&1 && break
+  # (the image's init phase serves the unix socket only; wait for the real TCP+TLS listener)
   sleep 1
 done
 docker exec pgappsec-pg pg_isready -U postgres -d appsec_test
