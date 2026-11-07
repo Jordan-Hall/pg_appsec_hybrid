@@ -380,29 +380,6 @@ load_pubkey_from_jwks(const char *path, const char *alg, const char *kid)
 	return pkey;
 }
 
-static bool
-file_contains_line_or_json_value(const char *path, const char *needle)
-{
-	FILE	   *f;
-	char		line[4096];
-
-	if (!path || path[0] == '\0' || !needle || needle[0] == '\0')
-		return false;
-	f = fopen(path, "r");
-	if (!f)
-		return false;
-	while (fgets(line, sizeof(line), f))
-	{
-		if (strstr(line, needle) != NULL)
-		{
-			fclose(f);
-			return true;
-		}
-	}
-	fclose(f);
-	return false;
-}
-
 /* ---- Strict session-state parsing (vendored jsmn v1.1.0, see jsmn.h) ---- */
 #define SESSION_STATE_MAX_TOKENS 400000
 
@@ -886,22 +863,171 @@ unlock:
 	return ok;
 }
 
+/*
+ * Issuer URL normalisation for exact comparison: scheme must be https:// or
+ * http:// (case-insensitive); scheme+host[:port] lower-cased; path kept
+ * byte-exact; a single trailing '/' is removed. Rejects userinfo ('@'),
+ * query/fragment, whitespace/control chars, backslashes, empty host.
+ */
+static bool
+issuer_normalize(const char *in, size_t len, char *out, size_t out_sz)
+{
+	size_t		i,
+				o = 0,
+				start;
+
+	if (len == 0 || len >= out_sz)
+		return false;
+	if (len > 8 && pg_strncasecmp(in, "https://", 8) == 0)
+		start = 8;
+	else if (len > 7 && pg_strncasecmp(in, "http://", 7) == 0)
+		start = 7;
+	else
+		return false;
+	for (i = 0; i < len; i++)
+	{
+		unsigned char c = (unsigned char) in[i];
+
+		if (c <= 0x20 || c >= 0x7f || c == '@' || c == '?' || c == '#' || c == '\\')
+			return false;
+	}
+	for (i = 0; i < start; i++)
+		out[o++] = (char) tolower((unsigned char) in[i]);
+	if (in[start] == '/' || in[start] == ':')
+		return false;			/* empty host */
+	for (i = start; i < len && in[i] != '/'; i++)
+		out[o++] = (char) tolower((unsigned char) in[i]);
+	for (; i < len; i++)
+		out[o++] = in[i];
+	if (o > start + 1 && out[o - 1] == '/')
+		o--;
+	out[o] = '\0';
+	return true;
+}
+
+static const char *im_reason = "";
+
+/*
+ * Strict per-tenant issuer map (JSON object, max 1 MiB):
+ *   {"https://issuer-a": ["<tenant-uuid>", ...], "https://issuer-b": ["*"]}
+ * The token's iss must exactly equal (after issuer_normalize) one key, and
+ * its tenant_id must exactly equal one listed tenant ("*" = any tenant,
+ * including tokens without tenant_id). Any parse/schema error denies.
+ */
 static bool
 issuer_allowed_for_tenant(const char *iss, const char *tenant_id)
 {
-	/* Optional map file: JSON {"https://issuer": ["tenant-uuid", ...]} or flat allowlist of issuers. */
+	FILE	   *f;
+	char	   *buf = NULL;
+	jsmntok_t  *t = NULL;
+	jsmn_parser p;
+	long		sz;
+	int			ntok,
+				i,
+				j,
+				k;
+	char		want[MAX_CLAIM];
+	char		have[MAX_CLAIM];
+	bool		iss_hit = false,
+				ok = false;
+
 	if (!g_issuer_map_file || g_issuer_map_file[0] == '\0')
 		return true;			/* rely on global g_issuer pin */
-	if (!file_contains_line_or_json_value(g_issuer_map_file, iss))
-		return false;
-	if (tenant_id && tenant_id[0] != '\0'
-		&& !file_contains_line_or_json_value(g_issuer_map_file, tenant_id))
+	if (!issuer_normalize(iss, strlen(iss), want, sizeof(want)))
 	{
-		/* If file has tenant lists, require tenant mention; if only issuers, tenant check soft-pass when tenant absent from file entirely. */
-		if (file_contains_line_or_json_value(g_issuer_map_file, "tenant"))
-			return false;
+		im_reason = "token iss not a valid issuer URL";
+		return false;
 	}
-	return true;
+	f = fopen(g_issuer_map_file, "r");
+	if (!f)
+	{
+		im_reason = "map unreadable";
+		return false;
+	}
+	if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) <= 0 || sz > 1024 * 1024)
+	{
+		fclose(f);
+		im_reason = "map empty or oversized";
+		return false;
+	}
+	rewind(f);
+	buf = palloc((size_t) sz + 1);
+	if (fread(buf, 1, (size_t) sz, f) != (size_t) sz)
+	{
+		fclose(f);
+		pfree(buf);
+		im_reason = "map read error";
+		return false;
+	}
+	fclose(f);
+	buf[sz] = '\0';
+	im_reason = "map malformed";
+	if (memchr(buf, '\0', (size_t) sz) != NULL)
+		{ ok = false; goto out; }
+	jsmn_init(&p);
+	ntok = jsmn_parse(&p, buf, (size_t) sz, NULL, 0);
+	if (ntok <= 0 || ntok > 100000)
+		{ ok = false; goto out; }
+	t = palloc(sizeof(jsmntok_t) * (size_t) ntok);
+	jsmn_init(&p);
+	if (jsmn_parse(&p, buf, (size_t) sz, t, (unsigned int) ntok) != ntok
+		|| t[0].type != JSMN_OBJECT || jtok_skip(t, 0, ntok) != ntok)
+		{ ok = false; goto out; }
+	for (i = t[0].end; i < sz; i++)
+		if (!isspace((unsigned char) buf[i]))
+			{ ok = false; goto out; }
+	j = 1;
+	for (k = 0; k < t[0].size; k++)
+	{
+		int			e,
+					n;
+		bool		this_iss;
+
+		if (j + 1 >= ntok || !jtok_plain_string(buf, &t[j]) || t[j + 1].type != JSMN_ARRAY)
+			{ ok = false; goto out; }
+		if (!issuer_normalize(buf + t[j].start, (size_t) (t[j].end - t[j].start), have, sizeof(have)))
+		{
+			im_reason = "map key not a valid issuer URL";
+			ok = false;
+			goto out;
+		}
+		this_iss = strcmp(have, want) == 0;
+		if (this_iss && iss_hit)
+		{
+			im_reason = "map has duplicate issuer";
+			{ ok = false; goto out; }
+		}
+		n = t[j + 1].size;
+		e = j + 2;
+		for (i = 0; i < n; i++, e++)
+		{
+			if (e >= ntok || !jtok_plain_string(buf, &t[e]) || t[e].end == t[e].start)
+				{ ok = false; goto out; }
+			if (this_iss)
+			{
+				if (jtok_eq(buf, &t[e], "*"))
+					ok = true;
+				else if (tenant_id && tenant_id[0] && jtok_eq(buf, &t[e], tenant_id))
+					ok = true;
+			}
+		}
+		if (this_iss)
+			iss_hit = true;
+		j = e;
+	}
+	if (!iss_hit)
+		im_reason = "issuer not in map";
+	else if (!ok)
+		im_reason = "tenant not allowed for issuer";
+	else
+		im_reason = "";
+	if (!iss_hit)
+		ok = false;
+out:
+	if (t)
+		pfree(t);
+	pfree(buf);
+	return ok;
 }
 
 static bool
@@ -1125,7 +1251,10 @@ pg_appsec_validate(const ValidatorModuleState *state,
 	json_get_string((const char *) jp.pay_json, jp.pay_len, "tenant_id", tenant, sizeof(tenant));
 
 	if (!issuer_allowed_for_tenant(iss, tenant))
+	{
+		ereport(LOG, (errmsg("pg_appsec_oauth: issuer map denied (%s)", im_reason)));
 		return true;
+	}
 	if (jti_denied(jti))
 	{
 		ereport(LOG, (errmsg("pg_appsec_oauth: jti denied (replay/denylist)")));

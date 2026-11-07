@@ -62,6 +62,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
       - name: Ban forced PgBouncer user=
         run: bash tools/check_pgbouncer_no_forced_user.sh
       - name: Regenerate and verify install.sql
@@ -73,7 +77,7 @@ jobs:
           for f in sql/001_roles.sql sql/002_schema.sql sql/003_policies.sql \
                    sql/004_identity_sessions_acl.sql sql/005_schema_security.sql \
                    sql/006_custom_rls.sql sql/007_hardening.sql sql/008_secdefiner_audit_and_pool.sql \
-                   sql/009_close_remaining_risks.sql sql/010_least_privilege_owners.sql; do
+                   sql/009_close_remaining_risks.sql sql/010_least_privilege_owners.sql sql/011_state_sync_role.sql; do
             psql -v ON_ERROR_STOP=1 -f "$f"
           done
       - name: Run adversarial SQL tests
@@ -88,6 +92,28 @@ jobs:
         run: psql -v ON_ERROR_STOP=1 -f tests/remaining_risks_regression.sql
       - name: Least-privilege owners + TEMP + audit checkpoint regression
         run: psql -v ON_ERROR_STOP=1 -f tests/least_privilege_regression.sql
+      - name: oauth-state-sync role regression (export only, no tables, no escalation)
+        run: psql -v ON_ERROR_STOP=1 -f tests/state_sync_role_regression.sql
+      - name: Live Rust auth service against PG18 (fresh database)
+        run: |
+          set -euo pipefail
+          psql -v ON_ERROR_STOP=1 -c "CREATE DATABASE appsec_live"
+          for f in sql/001_roles.sql sql/002_schema.sql sql/003_policies.sql \
+                   sql/004_identity_sessions_acl.sql sql/005_schema_security.sql \
+                   sql/006_custom_rls.sql sql/007_hardening.sql sql/008_secdefiner_audit_and_pool.sql \
+                   sql/009_close_remaining_risks.sql sql/010_least_privilege_owners.sql sql/011_state_sync_role.sql; do
+            PGDATABASE=appsec_live psql -q -v ON_ERROR_STOP=1 -f "$f" >/dev/null
+          done
+          psql -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN CREATE ROLE appsec_auth_live LOGIN PASSWORD 'live-svc-pass' NOINHERIT IN ROLE appsec_provisioner; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$"
+          K=$(mktemp -d)
+          openssl genpkey -algorithm ed25519 -out "$K/priv.pem"
+          openssl pkey -in "$K/priv.pem" -pubout -out "$K/pub.pem"
+          export APPSEC_LIVE_SERVICE_URL="postgres://appsec_auth_live:live-svc-pass@localhost:5432/appsec_live"
+          export APPSEC_LIVE_ADMIN_URL="postgres://postgres:postgres@localhost:5432/appsec_live"
+          export APPSEC_LIVE_DB_HOST=localhost APPSEC_LIVE_DB_PORT=5432 APPSEC_LIVE_DB_NAME=appsec_live
+          export APPSEC_LIVE_ED25519_PRIVATE_PEM="$K/priv.pem" APPSEC_LIVE_ED25519_PUBLIC_PEM="$K/pub.pem"
+          cargo test -p pg-appsec-auth --test live_pg -- --nocapture 2>&1 | tee live.log
+          grep -q '^live_pg_ok' live.log
 
   oauth-validator:
     name: OAuth validator E2E (PG18)

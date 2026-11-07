@@ -91,5 +91,7 @@ print("minted tokens for", role)
 # Fresh single-use probe tokens for parser / jti / sync-worker E2E phases.
 import secrets as _secrets
 _run = _secrets.token_hex(4)
-for _n in range(1, 121):
-    (td / f"token_p{_n}.txt").write_text(mint(sub="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", sid=sid, preferred_username=role, jti=f"jti-p{_n}-{_run}"))
+for _n in range(1, 161):
+    (td / f"token_p{_n}.txt").write_text(mint(sub="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", sid=sid, preferred_username=role, tenant_id="11111111-1111-1111-1111-111111111111", jti=f"jti-p{_n}-{_run}"))
+for _n in range(1, 4):
+    (td / f"token_nt{_n}.txt").write_text(mint(sub="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", sid=sid, preferred_username=role, jti=f"jti-nt{_n}-{_run}"))

@@ -138,10 +138,44 @@ docker cp "$WORK/jti.txt" "$NAME:$JTI"; docker exec "$NAME" chown postgres:postg
 expect jti_overlong_line fail "jti denied"
 docker exec "$NAME" bash -lc ": > '$JTI'"
 
+echo "== E. strict per-tenant issuer map"
+T=11111111-1111-1111-1111-111111111111
+IMAP="$DATADIR/sync/issuer_map.json"
+put_map() { printf '%s' "$1" > "$WORK/m.json"; docker cp "$WORK/m.json" "$NAME:$IMAP"; docker exec "$NAME" chmod 644 "$IMAP"; }
+mkstate "$WORK/s.json" good; put_state "$WORK/s.json"
+gucset pg_appsec.oauth_issuer_map_file "$IMAP"
+im() { # name map want [reason]
+  put_map "$2"; expect "issuer_$1" "$3" "${4:+issuer map denied ($4}"
+}
+im exact "{\"https://pg-appsec.test\": [\"$T\"]}" ok
+im normalized_case_trailing_slash "{\"HTTPS://PG-APPSEC.TEST/\": [\"$T\"]}" ok
+im wildcard_tenant '{"https://pg-appsec.test": ["*"]}' ok
+im suffix_evil '{"https://pg-appsec.test.evil": ["*"]}' fail "issuer not in map"
+im prefix_truncated '{"https://pg-appsec.tes": ["*"]}' fail "issuer not in map"
+im subdomain '{"https://evil.pg-appsec.test": ["*"]}' fail "issuer not in map"
+im extra_path '{"https://pg-appsec.test/x": ["*"]}' fail "issuer not in map"
+im issuer_only_as_value "{\"https://other.test\": [\"https://pg-appsec.test\", \"$T\"]}" fail "issuer not in map"
+im schemeless '{"pg-appsec.test": ["*"]}' fail "map key not a valid issuer URL"
+im userinfo '{"https://pg-appsec.test@evil.test": ["*"]}' fail "map key not a valid issuer URL"
+im tenant_prefix '{"https://pg-appsec.test": ["11111111"]}' fail "tenant not allowed for issuer"
+im tenant_superstring "{\"https://pg-appsec.test\": [\"$T-extra\"]}" fail "tenant not allowed for issuer"
+im other_tenant '{"https://pg-appsec.test": ["22222222-2222-2222-2222-222222222222"]}' fail "tenant not allowed for issuer"
+im duplicate_issuer "{\"https://pg-appsec.test\": [\"$T\"], \"https://PG-appsec.test/\": []}" fail "map has duplicate issuer"
+im flat_list '["https://pg-appsec.test"]' fail "map malformed"
+im non_string_tenant '{"https://pg-appsec.test": [1]}' fail "map malformed"
+put_map "{\"https://pg-appsec.test\": [\"$T\"]}"
+if try_login "$TD/token_nt1.txt"; then echo "FAIL token without tenant accepted for tenant-scoped issuer"; exit 1; fi
+sleep 0.2; docker logs --tail 6 "$NAME" 2>&1 | grep -q "issuer map denied (tenant not allowed for issuer" || { echo "FAIL no-tenant denial wrong reason"; exit 1; }
+echo "PASS issuer_missing_tenant_claim (fail, reason: tenant not allowed for issuer)"
+put_map '{"https://pg-appsec.test": ["*"]}'
+try_login "$TD/token_nt2.txt" || { echo "FAIL wildcard should accept token without tenant"; exit 1; }
+echo "PASS issuer_wildcard_no_tenant (ok)"
+gucreset pg_appsec.oauth_issuer_map_file
+
 echo "== C. live oauth-state-sync worker"
 for f in sql/001_roles.sql sql/002_schema.sql sql/003_policies.sql sql/004_identity_sessions_acl.sql \
          sql/005_schema_security.sql sql/006_custom_rls.sql sql/007_hardening.sql \
-         sql/008_secdefiner_audit_and_pool.sql sql/009_close_remaining_risks.sql sql/010_least_privilege_owners.sql; do
+         sql/008_secdefiner_audit_and_pool.sql sql/009_close_remaining_risks.sql sql/010_least_privilege_owners.sql sql/011_state_sync_role.sql; do
   psqlc < "$ROOT/$f" >/dev/null
 done
 psqlc <<SQL >/dev/null
@@ -157,9 +191,11 @@ INSERT INTO appsec.session_principals(session_id,user_id,db_role) VALUES
  ('$SID','aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','$ROLE')
 ON CONFLICT (session_id) DO UPDATE SET db_role=EXCLUDED.db_role;
 SQL
+# Worker runs as a dedicated non-superuser LOGIN member of appsec_state_sync.
+psqlc -c "DO \$\$ BEGIN CREATE ROLE oauth_state_sync_ci LOGIN INHERIT IN ROLE appsec_state_sync; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$" >/dev/null
 docker cp "$BIN" "$NAME:/usr/local/bin/oauth-state-sync"
 docker exec "$NAME" bash -lc "rm -f '$STATE'"
-DBURL='postgres:///postgres?host=/var/run/postgresql&user=postgres'
+DBURL='postgres:///postgres?host=/var/run/postgresql&user=oauth_state_sync_ci'
 start_worker() {
   docker exec -d -u postgres "$NAME" bash -c "echo \$\$ > '$DATADIR/sync/worker.pid'; exec /usr/local/bin/oauth-state-sync --database-url '$DBURL' --session-state-file '$STATE' --poll-secs 1 >> '$DATADIR/sync/worker.log' 2>&1"
   for i in $(seq 1 50); do docker exec "$NAME" test -s "$STATE" && return 0; sleep 0.2; done

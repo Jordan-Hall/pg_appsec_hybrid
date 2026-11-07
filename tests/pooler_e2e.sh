@@ -63,7 +63,7 @@ docker exec -e PGPASSWORD=postgres pgappsec-pg \
 for f in sql/001_roles.sql sql/002_schema.sql sql/003_policies.sql \
          sql/004_identity_sessions_acl.sql sql/005_schema_security.sql \
          sql/006_custom_rls.sql sql/007_hardening.sql sql/008_secdefiner_audit_and_pool.sql \
-         sql/009_close_remaining_risks.sql sql/010_least_privilege_owners.sql; do
+         sql/009_close_remaining_risks.sql sql/010_least_privilege_owners.sql sql/011_state_sync_role.sql; do
   docker exec -i pgappsec-pg psql -U postgres -d appsec_test -v ON_ERROR_STOP=1 < "$ROOT/$f" >/dev/null
 done
 
