@@ -43,3 +43,12 @@ Connect-time revocation against `appsec.sessions` is not performed inside the va
 ## Risk
 
 Treat this module as security-critical. **Independent cryptographic review is required before production.** Never log raw tokens.
+
+## Per-tenant issuer map (strict)
+
+`pg_appsec.oauth_issuer_map_file` must hold a JSON object of the form
+`{"https://issuer.example.com": ["<tenant-uuid>", ...], "https://other": ["*"]}`.
+Issuers are compared exactly after normalisation (http/https scheme and host
+lower-cased, path byte-exact, one trailing `/` removed; userinfo, query and
+fragment are rejected). Tenant IDs are compared exactly; `*` allows any tenant,
+including tokens without `tenant_id`. Any parse or schema error denies the login.

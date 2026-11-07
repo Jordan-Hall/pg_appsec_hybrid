@@ -63,3 +63,13 @@ Session roles are created only through `appsec.create_session_role(...)`
 (owned by NOLOGIN `appsec_role_admin`, CREATEROLE-only). The pooler E2E mints
 its two session roles through this helper; `appsec_provisioner` no longer
 holds CREATEROLE.
+
+## oauth-state-sync database role (round 5)
+
+Run the worker as a LOGIN member of `appsec_state_sync`, never as a superuser:
+
+```sql
+CREATE ROLE oauth_state_sync LOGIN INHERIT PASSWORD '...' IN ROLE appsec_state_sync;
+```
+
+This role can only call the three export/verify functions and LISTEN.

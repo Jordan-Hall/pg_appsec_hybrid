@@ -101,3 +101,18 @@ immutable blob, a remote syslog/SIEM), and keep the public key with the
 auditors. A superuser can still delete *new* (post-checkpoint) events
 undetected until the next checkpoint, and can stop the worker; alert on
 checkpoint gaps.
+
+## Hardening round 5 (exact issuer map, state-sync role, live auth-service test)
+
+| Area | What is protected | From whom | Mechanism | CI proof |
+|---|---|---|---|---|
+| Per-tenant issuer map (`pg_appsec.oauth_issuer_map_file`) | Which issuer may mint tokens for which tenant | An IdP/issuer trying lookalike URLs, or tenant IDs that differ by prefix/suffix | Strict JSON object `{"<issuer URL>": ["<tenant-id>" \| "*"]}` parsed with jsmn; issuer normalised (http/https scheme + host lower-cased, path kept byte-exact, one trailing `/` dropped; userinfo, query, fragment, whitespace, backslash rejected) and compared **exactly**; tenant compared exactly; duplicates/unknown shapes/oversize (1 MiB) deny. The old substring helper has been removed. Denials logged as `issuer map denied (<reason>)`. | `ci_sync_e2e.sh` E: `.evil` suffix, truncated prefix, subdomain, extra path, issuer only present as a value, schemeless, userinfo, tenant prefix/superstring/other, duplicate, flat list, non-string, missing tenant claim; case + trailing-slash variant and `*` allowed |
+| oauth-state-sync DB access | Session/credential tables, roles | A compromised sync-worker host | `appsec_state_sync` (NOLOGIN, no attributes, member of nothing): USAGE on `appsec` + EXECUTE on `export_oauth_session_state`, `export_audit_chain_head`, `verify_audit_chain_against_checkpoint` only. LISTEN needs no grant. The worker in CI runs as a LOGIN member (`oauth_state_sync_ci`), not a superuser. | `state_sync_role_regression.sql`: catalog checks (no table privileges, no extra SECURITY DEFINER) plus 25 denied probes, each matched to its `permission denied` message; the live E2E worker runs as the member |
+| Auth service role lifecycle | Session roles created/rotated/disabled only through `appsec_role_admin` helpers | Bugs in the service; a service account that is not a superuser | New live test `crates/appsec-auth/tests/live_pg.rs`, run on a fresh PG18 database with the service connecting as a non-superuser member of `appsec_provisioner` | Mint → attributes + ADMIN-only grant to `appsec_role_admin`; login + `uid()` scoped; credentials/sessions/SET ROLE/TEMP/mint denied; password rotation (old password denied); sign-out → "not permitted to log in"; expired session → `uid()` NULL then reaper → "not permitted to log in"; VALID UNTIL passed → denied |
+
+**Bugs found by the live test:** migration 008 gave the control-plane tables an
+owner-only RLS policy, which hid every row from `appsec_provisioner`. Real
+sign-up and sign-in were therefore broken; 011 adds a provisioner policy.
+`sign_in`/`refresh` also row-locked `tenants` without UPDATE privilege; that
+lock was removed (tenant status is still checked in the query and again by
+`uid()` on every statement).
